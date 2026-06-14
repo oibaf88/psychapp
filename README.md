@@ -106,3 +106,4 @@ MOCK_AI=true npm start
 ```
 
 Permite comprobar UI, PWA y flujo sin gastar tokens ni usar API real.
+
