@@ -20,6 +20,7 @@ const OPENAI_SECRET_FILE_PATH = path.join(SECRET_DIR, OPENAI_SECRET_FILE_NAME);
 const COOKIE_NAME = 'psychapp_oauth';
 const STATE_COOKIE_NAME = 'psychapp_oauth_state';
 const OAUTH_COOKIE_TTL_SECONDS = Number(process.env.OAUTH_COOKIE_TTL_SECONDS || 60 * 60 * 24 * 7);
+const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'consumers';
 
 const CONNECTOR_BY_LABEL = {
   gmail: 'connector_gmail',
@@ -50,7 +51,6 @@ const GOOGLE_SCOPES = readScopesFromEnv('GOOGLE_SCOPES', [
   'https://www.googleapis.com/auth/calendar.readonly'
 ]);
 
-const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'consumers';
 const MICROSOFT_SCOPES = readScopesFromEnv('MICROSOFT_SCOPES', [
   'openid',
   'profile',
@@ -72,18 +72,21 @@ const OAUTH_PROVIDERS = {
     clientSecretNames: ['GOOGLE_CLIENT_SECRET', 'GOOGLE_OAUTH_CLIENT_SECRET'],
     redirectUriNames: ['GOOGLE_REDIRECT_URI', 'GOOGLE_OAUTH_REDIRECT_URI'],
     scopes: GOOGLE_SCOPES,
-    authExtras: { access_type: 'offline', include_granted_scopes: 'true', prompt: 'consent' }
+    authExtras: { access_type: 'offline', include_granted_scopes: 'true', prompt: 'consent' },
+    sendScopeInTokenRequest: false
   },
   microsoft: {
     id: 'microsoft',
     label: 'Microsoft',
     authUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/oauth2/v2.0/authorize`,
     tokenUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/oauth2/v2.0/token`,
+    metadataUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/v2.0/.well-known/openid-configuration`,
     clientIdNames: ['MICROSOFT_CLIENT_ID', 'AZURE_CLIENT_ID', 'MS_CLIENT_ID'],
     clientSecretNames: ['MICROSOFT_CLIENT_SECRET', 'AZURE_CLIENT_SECRET', 'MS_CLIENT_SECRET'],
     redirectUriNames: ['MICROSOFT_REDIRECT_URI', 'AZURE_REDIRECT_URI', 'MS_REDIRECT_URI'],
     scopes: MICROSOFT_SCOPES,
-    authExtras: { prompt: 'select_account' }
+    authExtras: { prompt: 'select_account' },
+    sendScopeInTokenRequest: true
   }
 };
 
@@ -189,6 +192,21 @@ function redirect(res, location, extraHeaders = {}) {
   res.end();
 }
 
+function wantsJson(req, urlObj = null) {
+  const url = urlObj || new URL(req.url, `http://${req.headers.host}`);
+  const explicit = String(url.searchParams.get('format') || url.searchParams.get('response') || '').toLowerCase();
+  if (explicit === 'json') return true;
+  if (url.searchParams.get('json') === '1') return true;
+  const accept = String(req.headers.accept || '').toLowerCase();
+  const ctype = String(req.headers['content-type'] || '').toLowerCase();
+  return accept.includes('application/json') || ctype.includes('application/json');
+}
+
+function oauthReply(req, res, status, payload, htmlTitle = 'OAuth result', htmlMessage = '', returnTo = '/') {
+  if (wantsJson(req)) return sendJson(res, status, payload);
+  return sendHtml(res, status, oauthResultHtml(htmlTitle, htmlMessage || escapeHtml(payload?.message || payload?.error?.message || ''), returnTo));
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let total = 0;
@@ -205,6 +223,25 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+async function readRequestParams(req, reqUrl) {
+  const params = new URLSearchParams(reqUrl.searchParams);
+  if (req.method !== 'POST') return params;
+  const body = await readBody(req);
+  const ctype = String(req.headers['content-type'] || '').toLowerCase();
+  if (ctype.includes('application/json')) {
+    try {
+      const json = JSON.parse(body || '{}');
+      for (const [k, v] of Object.entries(json)) if (v != null) params.set(k, String(v));
+    } catch {
+      // Leave existing query params as-is.
+    }
+    return params;
+  }
+  const form = new URLSearchParams(body);
+  for (const [k, v] of form.entries()) params.set(k, v);
+  return params;
 }
 
 function sanitizeServerName(name) {
@@ -408,41 +445,68 @@ async function handleOAuthStart(req, res, providerName) {
 async function handleOAuthCallback(req, res, providerName) {
   const { provider, clientId, clientSecret } = oauthProviderConfig(providerName);
   if (!provider) return sendJson(res, 404, { error: { message: `Proveedor OAuth no soportado: ${providerName}` } });
+
   const reqUrl = new URL(req.url, absoluteBaseUrl(req));
-  const error = reqUrl.searchParams.get('error');
+  const paramsIn = await readRequestParams(req, reqUrl);
+  const jsonMode = wantsJson(req, reqUrl);
+  const error = paramsIn.get('error');
   if (error) {
-    return sendHtml(res, 400, oauthResultHtml('OAuth denied', `Proveedor: ${provider.label}. Error: ${escapeHtml(error)}<br>${escapeHtml(reqUrl.searchParams.get('error_description') || '')}`, '/'));
+    const payload = { ok: false, provider: providerName, error: { code: error, message: paramsIn.get('error_description') || error } };
+    return oauthReply(req, res, 400, payload, 'OAuth denied', `Proveedor: ${provider.label}. Error: ${escapeHtml(error)}<br>${escapeHtml(paramsIn.get('error_description') || '')}`, '/');
   }
 
-  const code = reqUrl.searchParams.get('code');
-  const state = reqUrl.searchParams.get('state');
+  const code = paramsIn.get('code');
+  const state = paramsIn.get('state');
   const statePayload = verifyStatePayload(parseCookies(req)[STATE_COOKIE_NAME]);
   if (!code || !state || !statePayload || statePayload.state !== state || statePayload.provider !== providerName) {
-    return sendHtml(res, 400, oauthResultHtml('OAuth state invalid', 'Reintenta la conexión desde la app.', '/'));
+    return oauthReply(req, res, 400, { ok: false, provider: providerName, error: { message: 'OAuth state invalid or missing. Start the flow from /api/oauth/start/' + providerName } }, 'OAuth state invalid', 'Reintenta la conexión desde la app.', '/');
   }
   if (Date.now() - Number(statePayload.created_at || 0) > 10 * 60 * 1000) {
-    return sendHtml(res, 400, oauthResultHtml('OAuth expired', 'La solicitud caducó. Reintenta la conexión.', '/'));
+    return oauthReply(req, res, 400, { ok: false, provider: providerName, error: { message: 'OAuth request expired. Start again.' } }, 'OAuth expired', 'La solicitud caducó. Reintenta la conexión.', '/');
   }
 
-  const params = new URLSearchParams();
-  params.set('client_id', clientId);
-  if (clientSecret) params.set('client_secret', clientSecret);
-  params.set('code', code);
-  params.set('redirect_uri', redirectUriFor(req, providerName));
-  params.set('grant_type', 'authorization_code');
-  params.set('code_verifier', statePayload.verifier);
-  params.set('scope', provider.scopes.join(' '));
+  const tokenParams = new URLSearchParams();
+  tokenParams.set('client_id', clientId);
+  if (clientSecret) tokenParams.set('client_secret', clientSecret);
+  tokenParams.set('code', code);
+  tokenParams.set('redirect_uri', redirectUriFor(req, providerName));
+  tokenParams.set('grant_type', 'authorization_code');
+  tokenParams.set('code_verifier', statePayload.verifier);
+  if (provider.sendScopeInTokenRequest) tokenParams.set('scope', provider.scopes.join(' '));
 
   const tokenResponse = await fetch(provider.tokenUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'application/json'
+    },
+    body: tokenParams.toString()
   });
   const tokenText = await tokenResponse.text();
+  const tokenContentType = tokenResponse.headers.get('content-type') || '';
   let tokenJson;
   try { tokenJson = JSON.parse(tokenText); } catch { tokenJson = null; }
-  if (!tokenResponse.ok) {
-    return sendHtml(res, tokenResponse.status, oauthResultHtml('OAuth token exchange failed', escapeHtml(tokenJson?.error_description || tokenJson?.error || tokenText), '/'));
+
+  if (!tokenResponse.ok || !tokenJson) {
+    const firstBytes = tokenText.slice(0, 300);
+    const payload = {
+      ok: false,
+      provider: providerName,
+      token_endpoint: provider.tokenUrl,
+      token_status: tokenResponse.status,
+      token_content_type: tokenContentType,
+      error: {
+        message: tokenJson?.error_description || tokenJson?.error || (tokenJson ? `HTTP ${tokenResponse.status}` : 'Token endpoint did not return JSON'),
+        aadsts: extractAadsts(tokenJson?.error_description || tokenText),
+        non_json_response_preview: tokenJson ? undefined : firstBytes
+      }
+    };
+    return oauthReply(req, res, tokenResponse.ok ? 502 : tokenResponse.status, payload, 'OAuth token exchange failed', escapeHtml(payload.error.message), '/');
+  }
+
+  if (!tokenJson.access_token) {
+    const payload = { ok: false, provider: providerName, error: { message: 'Token JSON did not include access_token', raw_status: tokenResponse.status } };
+    return oauthReply(req, res, 502, payload, 'OAuth token exchange failed', 'La respuesta JSON no contiene access_token.', '/');
   }
 
   const store = readOAuthStore(req);
@@ -455,9 +519,26 @@ async function handleOAuthCallback(req, res, providerName) {
     token_type: tokenJson.token_type || 'Bearer',
     updated_at: Date.now()
   };
+
   const headers = [writeOAuthStore(req, store), cookieString(STATE_COOKIE_NAME, '', req, { maxAge: 0 })];
   const returnTo = statePayload.return_to || '/';
+  if (jsonMode) {
+    return sendJson(res, 200, {
+      ok: true,
+      provider: providerName,
+      connected: true,
+      token_type: store.providers[providerName].token_type,
+      expires_at: store.providers[providerName].expires_at,
+      scope: store.providers[providerName].scope,
+      return_to: returnTo
+    }, { 'Set-Cookie': headers });
+  }
   return redirect(res, `${returnTo}${returnTo.includes('?') ? '&' : '?'}oauth=${providerName}_connected`, { 'Set-Cookie': headers });
+}
+
+function extractAadsts(text = '') {
+  const match = String(text).match(/AADSTS\d+/i);
+  return match ? match[0].toUpperCase() : '';
 }
 
 function oauthResultHtml(title, message, returnTo = '/') {
@@ -506,7 +587,9 @@ function publicOAuthConfig(req) {
       redirect_uri: redirectUriFor(req, id),
       auth_url: provider.authUrl,
       token_url: provider.tokenUrl,
-      scopes: provider.scopes
+      metadata_url: provider.metadataUrl || null,
+      scopes: provider.scopes,
+      scope_string: provider.scopes.join(' ')
     }];
   }));
 }
@@ -515,9 +598,7 @@ function handleOAuthLogout(req, res, providerName = '') {
   const store = readOAuthStore(req);
   if (providerName && store.providers?.[providerName]) delete store.providers[providerName];
   if (!providerName) store.providers = {};
-  return sendJson(res, 200, { ok: true, disconnected: providerName || 'all' }, {
-    'Set-Cookie': writeOAuthStore(req, store)
-  });
+  return sendJson(res, 200, { ok: true, disconnected: providerName || 'all' }, { 'Set-Cookie': writeOAuthStore(req, store) });
 }
 
 function getOAuthTokenWithMeta(req, label, connectorId = '') {
@@ -589,12 +670,7 @@ function convertTools(req, legacyTools = [], mcpServers = []) {
 
     const serverUrl = srv.url || srv.server_url;
     if (typeof serverUrl !== 'string' || !serverUrl.startsWith('https://')) continue;
-    const tool = {
-      type: 'mcp',
-      server_label: label,
-      server_url: serverUrl,
-      require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
-    };
+    const tool = { type: 'mcp', server_label: label, server_url: serverUrl, require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never' };
     if (tokenInfo.value) tool.authorization = tokenInfo.value.startsWith('Bearer ') ? tokenInfo.value : `Bearer ${tokenInfo.value}`;
     tools.push(tool);
   }
@@ -642,12 +718,7 @@ async function handleMessages(req, res) {
     const keyInfo = getOpenAIKeyWithMeta();
     const key = keyInfo.value;
     if (!key) {
-      return sendJson(res, 500, {
-        error: {
-          message: `Falta clave OpenAI. Crea un Render Secret File llamado ${OPENAI_SECRET_FILE_NAME}. En Render se monta como ${OPENAI_SECRET_FILE_PATH}.`,
-          diagnostic: publicDiagnostics(req)
-        }
-      });
+      return sendJson(res, 500, { error: { message: `Falta clave OpenAI. Crea un Render Secret File llamado ${OPENAI_SECRET_FILE_NAME}. En Render se monta como ${OPENAI_SECRET_FILE_PATH}.`, diagnostic: publicDiagnostics(req) } });
     }
 
     const payload = toResponsesPayload(req, body);
@@ -713,19 +784,24 @@ function publicDiagnostics(req = null) {
       status_url: '/api/oauth/status',
       start_google_url: '/api/oauth/start/google',
       start_microsoft_url: '/api/oauth/start/microsoft',
+      callback_json_hint: '/api/oauth/callback/microsoft?json=1',
       config: req ? publicOAuthConfig(req) : {}
     },
     oauth_tokens: req ? tokenPresenceSummary(req) : {},
     notes: [
       'Este endpoint no muestra valores secretos.',
+      'OAuth callbacks accept GET and POST. Add ?json=1 or Accept: application/json to force JSON responses.',
       'Microsoft personal accounts use MICROSOFT_TENANT=consumers and personal-safe Graph scopes by default.',
-      'Do not add Sites.Read.All or Team.ReadBasic.All until the personal-account flow works.'
+      'Do not configure PsychApp as an OAuth/OIDC provider. PsychApp is the client; Microsoft is the provider.'
     ]
   };
 }
 
 function serveStatic(req, res) {
-  let urlPath = decodeURIComponent(new URL(req.url, `http://${req.headers.host}`).pathname);
+  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+  if (pathname.startsWith('/api/')) return sendJson(res, 404, { error: { message: `API route not found: ${pathname}` } });
+
+  let urlPath = decodeURIComponent(pathname);
   if (urlPath === '/') urlPath = '/index.html';
   const filePath = path.normalize(path.join(DIST, urlPath));
   if (!filePath.startsWith(DIST)) return sendJson(res, 403, { error: { message: 'Forbidden' } });
@@ -756,17 +832,27 @@ function mime(file) {
   }[ext]) || 'application/octet-stream';
 }
 
+function methodNotAllowed(res, allowed) {
+  return sendJson(res, 405, { error: { message: `Method not allowed. Use: ${allowed}` } }, { Allow: allowed });
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
   const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
   if (pathname === '/api/health') return sendJson(res, 200, publicDiagnostics(req));
   if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
   if (pathname === '/api/oauth/status') return handleOAuthStatus(req, res);
-  if (pathname === '/api/oauth/logout' && req.method === 'POST') return handleOAuthLogout(req, res);
-  if (pathname.startsWith('/api/oauth/logout/') && req.method === 'POST') return handleOAuthLogout(req, res, pathname.split('/').pop());
-  if (pathname.startsWith('/api/oauth/start/') && req.method === 'GET') return handleOAuthStart(req, res, pathname.split('/').pop()).catch(err => sendJson(res, err.status || 500, { error: { message: err.message } }));
-  if (pathname.startsWith('/api/oauth/callback/') && req.method === 'GET') return handleOAuthCallback(req, res, pathname.split('/').pop()).catch(err => sendHtml(res, err.status || 500, oauthResultHtml('OAuth error', escapeHtml(err.message), '/')));
-  if (pathname === '/api/messages' && req.method === 'POST') return handleMessages(req, res);
+  if (pathname === '/api/oauth/logout') return req.method === 'POST' ? handleOAuthLogout(req, res) : methodNotAllowed(res, 'POST');
+  if (pathname.startsWith('/api/oauth/logout/')) return req.method === 'POST' ? handleOAuthLogout(req, res, pathname.split('/').pop()) : methodNotAllowed(res, 'POST');
+  if (pathname.startsWith('/api/oauth/start/')) return req.method === 'GET' ? handleOAuthStart(req, res, pathname.split('/').pop()).catch(err => sendJson(res, err.status || 500, { error: { message: err.message } })) : methodNotAllowed(res, 'GET');
+  if (pathname.startsWith('/api/oauth/callback/')) {
+    if (req.method !== 'GET' && req.method !== 'POST') return methodNotAllowed(res, 'GET, POST');
+    return handleOAuthCallback(req, res, pathname.split('/').pop()).catch(err => {
+      const payload = { ok: false, error: { message: err.message || 'OAuth callback error' } };
+      return wantsJson(req) ? sendJson(res, err.status || 500, payload) : sendHtml(res, err.status || 500, oauthResultHtml('OAuth error', escapeHtml(err.message), '/'));
+    });
+  }
+  if (pathname === '/api/messages') return req.method === 'POST' ? handleMessages(req, res) : methodNotAllowed(res, 'POST');
   return serveStatic(req, res);
 });
 
