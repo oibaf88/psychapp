@@ -28,6 +28,36 @@ function loadDotEnv(file) {
   }
 }
 
+function readSecretFile(filePath) {
+  if (!filePath) return '';
+  try {
+    if (!fs.existsSync(filePath)) return '';
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function getOpenAIKey() {
+  const direct = String(process.env.OPENAI_API_KEY || '').trim();
+  if (direct) return direct;
+
+  const candidates = [
+    process.env.OPENAI_API_KEY_FILE,
+    process.env.OPENAI_SECRET_FILE,
+    '/etc/secrets/openai_api_key',
+    '/etc/secrets/OPENAI_API_KEY',
+    path.join(ROOT, 'openai_api_key'),
+    path.join(ROOT, 'OPENAI_API_KEY')
+  ].filter(Boolean);
+
+  for (const filePath of candidates) {
+    const value = readSecretFile(filePath);
+    if (value) return value;
+  }
+  return '';
+}
+
 function sendJson(res, status, payload) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -159,10 +189,10 @@ async function handleMessages(req, res) {
     const mock = maybeMock(body);
     if (mock) return sendJson(res, 200, mock);
 
-    const key = process.env.OPENAI_API_KEY;
+    const key = getOpenAIKey();
     if (!key) {
       return sendJson(res, 500, {
-        error: { message: 'Falta OPENAI_API_KEY en .env. Crea .env desde .env.example y reinicia el servidor.' }
+        error: { message: 'Falta clave OpenAI. Configura OPENAI_API_KEY o crea un Render Secret File llamado openai_api_key con la clave dentro.' }
       });
     }
 
@@ -221,21 +251,12 @@ function mime(file) {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  if (url.pathname === '/api/health') {
-    return sendJson(res, 200, {
-      ok: true,
-      provider: 'OpenAI',
-      apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
-      mockMode: process.env.MOCK_AI === 'true',
-      model: DEFAULT_MODEL,
-      pwa: true
-    });
-  }
-  if (url.pathname === '/api/messages' && req.method === 'POST') return handleMessages(req, res);
+  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+  if (pathname === '/api/health') return sendJson(res, 200, { ok: true, provider: 'openai', mock: process.env.MOCK_AI === 'true', has_openai_key: Boolean(getOpenAIKey()) });
+  if (pathname === '/api/messages' && req.method === 'POST') return handleMessages(req, res);
   return serveStatic(req, res);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Psyche Deep Android/OpenAI en http://localhost:${PORT}`);
+  console.log(`Psyche Deep listening on http://0.0.0.0:${PORT}`);
 });
