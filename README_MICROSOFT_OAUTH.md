@@ -33,6 +33,45 @@ MS_CLIENT_SECRET=...
 MS_REDIRECT_URI=...
 ```
 
+## Important: PsychApp is the OAuth client, not the OAuth provider
+
+Do **not** configure PsychApp as an OpenID Connect provider, identity provider, credential validation endpoint, token issuer, or metadata endpoint.
+
+PsychApp does not expose an OAuth discovery document such as:
+
+```text
+/.well-known/openid-configuration
+```
+
+and it does not expose a token endpoint such as:
+
+```text
+/oauth/token
+```
+
+Microsoft is the OAuth provider. PsychApp is only the web application that receives the OAuth redirect callback.
+
+The only PsychApp URL that Microsoft Entra should usually know is the redirect URI:
+
+```text
+https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+```
+
+Provider endpoints are Microsoft-owned:
+
+```text
+Authorization endpoint:
+https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
+
+Token endpoint:
+https://login.microsoftonline.com/consumers/oauth2/v2.0/token
+
+OIDC metadata endpoint:
+https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration
+```
+
+If a Microsoft/OpenAI/custom connector screen asks for a credential validation URL, issuer URL, metadata URL, token URL, or authorization URL, do not use your PsychApp root URL. Use the Microsoft URLs above, or leave that field unused if you are configuring a normal Microsoft Entra App Registration.
+
 ## Recommended for personal Microsoft accounts
 
 For Outlook.com, Hotmail, Live, Xbox or other personal Microsoft accounts, create the app registration with one of these account types:
@@ -201,6 +240,35 @@ Expected result:
 ```
 
 ## Common errors
+
+### Credential Validation Unavailable / unexpected response: `<. Path "", line 0, position 0.`
+
+This means a validator expected JSON, but received HTML. HTML responses usually start with `<`, for example `<!doctype html>`.
+
+Most likely causes:
+
+1. You entered `https://YOUR-APP.onrender.com` as a metadata, token, issuer, or credential validation endpoint.
+2. You entered `https://YOUR-APP.onrender.com/api/oauth/callback/microsoft` in a place that expects a JSON endpoint.
+3. You are configuring a custom identity provider/OIDC provider instead of a normal Microsoft Entra App Registration.
+4. Your app was down and Render returned an HTML error page.
+
+Correct model:
+
+```text
+Microsoft authorization endpoint:
+https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
+
+Microsoft token endpoint:
+https://login.microsoftonline.com/consumers/oauth2/v2.0/token
+
+Microsoft metadata endpoint:
+https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration
+
+PsychApp redirect URI:
+https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+```
+
+Do not use PsychApp as the credential validation URL.
 
 ### AADSTS50011 redirect URI mismatch
 
