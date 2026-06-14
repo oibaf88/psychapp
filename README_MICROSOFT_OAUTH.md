@@ -1,198 +1,91 @@
-# Microsoft OAuth setup for PsychApp
+# OAuth JSON compatibility: Microsoft / Google callbacks
 
-This guide configures Microsoft OAuth 2.0 for Outlook.com, Hotmail, Live, Microsoft personal mail, calendars, and OneDrive files through Microsoft Graph.
+This app is an OAuth **client**, not an OAuth/OIDC provider.
 
-## What PsychApp implements
+Do **not** configure PsychApp as a credential validation endpoint, issuer URL, token endpoint, authorization endpoint, or OIDC metadata endpoint. If a validator calls PsychApp expecting provider JSON but receives `<html>`, it will fail with errors such as:
 
-The backend exposes:
+- `Credential Validation Unavailable`
+- `unexpected response from your application: <`
+- `Path "", line 0, position 0`
 
-```text
-GET  /api/oauth/start/microsoft
-GET  /api/oauth/callback/microsoft
-GET  /api/oauth/status
-POST /api/oauth/logout/microsoft
-GET  /api/debug/config
-```
+That means the caller expected JSON but received the PWA `index.html` or an HTML OAuth result page.
 
-PsychApp is the OAuth client. Microsoft is the OAuth provider. PsychApp is not an OIDC provider and does not expose a metadata endpoint.
+## Correct Microsoft endpoints
 
-## Render variables
-
-Use these names in Render:
-
-```env
-PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
-OAUTH_COOKIE_SECRET=GENERATE_A_LONG_RANDOM_STRING
-MICROSOFT_CLIENT_ID=YOUR_APPLICATION_CLIENT_ID
-MICROSOFT_CLIENT_SECRET=YOUR_CLIENT_SECRET_VALUE
-MICROSOFT_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-MICROSOFT_TENANT=consumers
-MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
-MCP_REQUIRE_APPROVAL=never
-```
-
-Keep OpenAI separately as a Render Secret File:
+For personal Microsoft accounts such as Outlook.com, Hotmail, and Live:
 
 ```text
-Filename: OPENAI_API_SECRET
-Contents: sk-proj-...
-Mounted path: /etc/secrets/OPENAI_API_SECRET
-```
+Tenant / Authority:
+https://login.microsoftonline.com/consumers
 
-## Microsoft endpoints for personal accounts
-
-Use `consumers` for Outlook.com / Hotmail / Live personal accounts:
-
-```text
 Authorization endpoint:
 https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
 
 Token endpoint:
 https://login.microsoftonline.com/consumers/oauth2/v2.0/token
 
-OIDC metadata endpoint:
+OpenID metadata:
 https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration
 ```
 
-Do not put PsychApp URLs in the authorization endpoint or token endpoint fields.
+## PsychApp redirect URI
 
-## Redirect URI
-
-Register this exact Web redirect URI in Microsoft Entra:
-
-```text
-https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-```
-
-Example:
+Register this as the redirect URI / reply URL in Microsoft Entra:
 
 ```text
 https://pyschapp.onrender.com/api/oauth/callback/microsoft
 ```
 
-The value in Microsoft Entra must match `MICROSOFT_REDIRECT_URI` exactly.
-
-## Microsoft Entra setup
-
-1. Go to Microsoft Entra admin center.
-2. Open `Applications` -> `App registrations` -> `New registration`.
-3. Name the app, for example `PsychApp OAuth`.
-4. For personal accounts, choose:
+Register this as the redirect URI in Google Cloud Console:
 
 ```text
-Personal Microsoft accounts only
+https://pyschapp.onrender.com/api/oauth/callback/google
 ```
 
-or, if you also want work/school accounts:
+## Render variables
+
+```env
+PUBLIC_BASE_URL=https://pyschapp.onrender.com
+OAUTH_COOKIE_SECRET=<long-random-string>
+MICROSOFT_TENANT=consumers
+MICROSOFT_CLIENT_ID=<application-client-id>
+MICROSOFT_CLIENT_SECRET=<client-secret-value>
+MICROSOFT_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
+GOOGLE_CLIENT_ID=<google-client-id>
+GOOGLE_CLIENT_SECRET=<google-client-secret>
+GOOGLE_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/google
+```
+
+## JSON callback mode
+
+The updated server accepts both `GET` and `POST` on:
 
 ```text
-Accounts in any organizational directory and personal Microsoft accounts
+/api/oauth/callback/google
+/api/oauth/callback/microsoft
 ```
 
-5. Add the Web redirect URI.
-6. Register the app.
-7. Copy `Application (client) ID` into Render as `MICROSOFT_CLIENT_ID`.
-8. Create a client secret under `Certificates & secrets`.
-9. Copy the secret **Value** into Render as `MICROSOFT_CLIENT_SECRET`.
-10. Under `API permissions`, add Microsoft Graph delegated permissions:
+It returns JSON instead of HTML if the request includes either:
 
 ```text
-User.Read
-Mail.Read
-Files.Read.All
-Calendars.Read
-offline_access
-openid
-profile
-email
+?json=1
 ```
 
-## Scope string
-
-For personal accounts, use this exact scope string when any external OAuth screen asks for scopes:
+or an HTTP header:
 
 ```text
-openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
+Accept: application/json
 ```
 
-Do not start with Teams or SharePoint scopes. Add these only later for work/school Microsoft 365 accounts if you need them:
+Example:
 
 ```text
-https://graph.microsoft.com/Sites.Read.All
-https://graph.microsoft.com/Team.ReadBasic.All
+https://pyschapp.onrender.com/api/oauth/callback/microsoft?json=1
 ```
 
-## Testing
+## Important
 
-After changing Render variables, run:
+Do not paste the authorization `code=` URL into chats or issue trackers. It is a temporary credential.
 
-```text
-Manual Deploy -> Clear build cache & deploy
-```
 
-Then open:
-
-```text
-https://YOUR-APP.onrender.com/api/debug/config
-```
-
-Check that Microsoft shows:
-
-```text
-microsoft_tenant: consumers
-non-empty scopes
-client_id_present: true
-client_secret_present: true
-```
-
-Start OAuth:
-
-```text
-https://YOUR-APP.onrender.com/api/oauth/start/microsoft
-```
-
-After login, check:
-
-```text
-https://YOUR-APP.onrender.com/api/oauth/status
-```
-
-Expected:
-
-```json
-{
-  "ok": true,
-  "providers": {
-    "microsoft": {
-      "connected": true
-    }
-  }
-}
-```
-
-## Common mistakes
-
-### Empty or invalid scope
-
-Use the full scope string above. Do not leave the scope field blank. Do not use Teams/SharePoint scopes until the personal flow works.
-
-### Wrong endpoint
-
-Wrong:
-
-```text
-Authorization URL = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-Token URL = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-```
-
-Correct:
-
-```text
-Authorization URL = https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
-Token URL = https://login.microsoftonline.com/consumers/oauth2/v2.0/token
-Redirect URI = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-```
-
-### Redirect mismatch
-
-The redirect URI in Microsoft Entra and in Render must be identical.
