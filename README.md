@@ -6,19 +6,25 @@ Aplicación React/Vite convertida desde el JSX original a una PWA usable en Andr
 
 - Frontend React/Vite compilable.
 - PWA instalable desde Chrome en Android 16.
-- Backend Node en `server.mjs` que guarda la `OPENAI_API_KEY` fuera del móvil/frontend.
+- Backend Node en `server.mjs` que guarda la clave de OpenAI fuera del móvil/frontend.
 - Adaptador compatible con la app original: el frontend sigue esperando `{content:[{type:"text", text:"..."}]}`.
 - OpenAI Responses API usando `/v1/responses`.
-- Web search usando `tools: [{ type: "web_search" }]` cuando la app lo pide.
-- MCP remoto opcional usando tools tipo `mcp` si configuras tokens en `.env`.
+- OAuth interactivo para Google y Microsoft.
+- Conectores OpenAI/MCP para Gmail, Google Drive, Google Calendar, Outlook, Microsoft Calendar, Teams y SharePoint/OneDrive cuando el usuario autoriza OAuth.
 - Modo demo sin API real con `MOCK_AI=true`.
+
+## Documentación importante
+
+- Google OAuth: ver `README_OAUTH_SETUP.md` si está presente.
+- Microsoft OAuth / Outlook / Hotmail / Live / OneDrive: ver [`README_MICROSOFT_OAUTH.md`](./README_MICROSOFT_OAUTH.md).
+- Variables de entorno: ver [`.env.example`](./.env.example).
 
 ## Ejecución local en ordenador
 
 ```bash
 npm install
 cp .env.example .env
-# edita .env y añade OPENAI_API_KEY
+# edita .env y añade tus variables locales
 npm run build
 npm start
 ```
@@ -38,24 +44,56 @@ Opción recomendada: desplegar el backend en Render/VPS y abrir la URL HTTPS en 
 3. Build command:
 
 ```bash
-npm install && npm run build
+npm install --no-audit --no-fund && npm run build
 ```
 
 4. Start command:
 
 ```bash
-npm start
+node server.mjs
 ```
 
-5. Variables de entorno en Render:
+5. Variables mínimas de entorno en Render:
 
 ```text
-OPENAI_API_KEY=sk-proj-...
+NODE_VERSION=22.22.0
+PORT=10000
+PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
+OAUTH_COOKIE_SECRET=una_cadena_larga_aleatoria
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
+MCP_REQUIRE_APPROVAL=never
 ```
 
-6. En Android 16: abre la URL HTTPS en Chrome → menú ⋮ → **Añadir a pantalla de inicio** / **Instalar app**.
+6. OpenAI como Render Secret File:
+
+```text
+Filename: OPENAI_API_SECRET
+Contents: sk-proj-...
+Mounted path: /etc/secrets/OPENAI_API_SECRET
+```
+
+7. En Android 16: abre la URL HTTPS en Chrome → menú ⋮ → **Añadir a pantalla de inicio** / **Instalar app**.
+
+## Variables OAuth principales
+
+Google:
+
+```env
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/google
+```
+
+Microsoft:
+
+```env
+MICROSOFT_CLIENT_ID=...
+MICROSOFT_CLIENT_SECRET=...
+MICROSOFT_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+```
+
+Para Microsoft personal Outlook/Hotmail/Live, consulta `README_MICROSOFT_OAUTH.md`.
 
 ## Uso solo desde Android con Termux
 
@@ -64,8 +102,7 @@ También puedes ejecutarla localmente en el móvil:
 ```bash
 pkg update
 pkg install nodejs git unzip
-unzip psyche-deep-android-openai.zip
-cd psyche-deep-android-openai
+cd psychapp
 npm install
 cp .env.example .env
 nano .env
@@ -79,24 +116,12 @@ Luego abre en Chrome:
 http://127.0.0.1:4173
 ```
 
-## Conectores / MCP
-
-El backend acepta servidores MCP remotos enviados desde el frontend y los transforma a herramientas OpenAI `mcp`. Puedes configurar tokens:
-
-```text
-MCP_TOKEN_GMAIL=Bearer_o_token_oauth
-MCP_TOKEN_DRIVE=Bearer_o_token_oauth
-MCP_TOKEN_M365=Bearer_o_token_oauth
-MCP_TOKEN_ZAPIER=Bearer_o_token_oauth
-MCP_REQUIRE_APPROVAL=never
-```
-
-Importante: los servidores MCP y los tokens deben ser reales y válidos. La app no inventa OAuth; solo deja preparado el puente seguro.
-
 ## Seguridad
 
-- No metas `OPENAI_API_KEY` en React, `localStorage` ni variables `VITE_*`.
+- No metas `OPENAI_API_KEY`, `OPENAI_API_SECRET`, `MICROSOFT_CLIENT_SECRET` ni `GOOGLE_CLIENT_SECRET` en React, `localStorage`, GitHub ni variables `VITE_*`.
 - El backend usa `OPENAI_STORE=false` por defecto.
+- OAuth de Google/Microsoft se hace por redirección interactiva; no guardes access tokens manuales en Render.
+- Los tokens OAuth se guardan por usuario en cookie cifrada HttpOnly.
 - Evita MCP de terceros no confiables: pueden recibir datos sensibles.
 
 ## Modo demo
@@ -106,4 +131,3 @@ MOCK_AI=true npm start
 ```
 
 Permite comprobar UI, PWA y flujo sin gastar tokens ni usar API real.
-
