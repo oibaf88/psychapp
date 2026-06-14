@@ -1,10 +1,10 @@
 {
   "name": "psyche-deep-android-openai",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.22.0 <23.0.0",
+    "node": "22.22.0",
     "npm": ">=10.0.0 <12.0.0"
   },
   "scripts": {
@@ -16,12 +16,12 @@
     "health": "node -e \"fetch('http://127.0.0.1:4173/api/health').then(r=>r.json()).then(console.log)\""
   },
   "dependencies": {
-    "@tabler/icons-webfont": "^3.44.0",
-    "@vitejs/plugin-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "recharts": "latest",
-    "vite": "latest"
+    "@tabler/icons-webfont": "3.44.0",
+    "@vitejs/plugin-react": "6.0.2",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "recharts": "3.8.1",
+    "vite": "8.0.16"
   },
   "description": "Psyche Deep PWA Android 16 with OpenAI backend"
 }
