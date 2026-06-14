@@ -95,7 +95,11 @@ GOOGLE_OAUTH_CLIENT_SECRET=...
 GOOGLE_OAUTH_REDIRECT_URI=...
 ```
 
-Do not mix Google values into Microsoft variables.
+Optional scope override. Leave commented unless debugging:
+
+```env
+# GOOGLE_SCOPES=openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.readonly
+```
 
 Google redirect URI to register in Google Cloud Console:
 
@@ -132,28 +136,34 @@ Microsoft redirect URI to register in Microsoft Entra:
 https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
 ```
 
-## Microsoft tenant note
+## Microsoft tenant and scopes
 
-The current backend version hardcodes Microsoft OAuth to:
+The backend now reads:
+
+```env
+MICROSOFT_TENANT=consumers
+```
+
+For personal Outlook/Hotmail/Live accounts, keep:
+
+```env
+MICROSOFT_TENANT=consumers
+```
+
+The backend default Microsoft scope set is personal-account safe and uses full Microsoft Graph scope names:
+
+```env
+MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
+```
+
+Do not add these while debugging personal accounts:
 
 ```text
-https://login.microsoftonline.com/common/oauth2/v2.0/authorize
-https://login.microsoftonline.com/common/oauth2/v2.0/token
+https://graph.microsoft.com/Sites.Read.All
+https://graph.microsoft.com/Team.ReadBasic.All
 ```
 
-So adding this variable currently has no effect unless the backend is changed:
-
-```env
-MICROSOFT_TENANT=consumers
-```
-
-For personal Outlook/Hotmail/Live accounts, the ideal code change is to make Microsoft tenant configurable and set:
-
-```env
-MICROSOFT_TENANT=consumers
-```
-
-Until that code change is applied, configure the Microsoft Entra app to allow personal Microsoft accounts and keep using the existing `/common/` endpoints.
+Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams.
 
 ## OAuth cookie secret generation
 
@@ -193,6 +203,8 @@ GOOGLE_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/google
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_TENANT=consumers
+MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
 ```
 
 Plus Render Secret File:
