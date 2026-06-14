@@ -1,0 +1,57 @@
+:root {
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --color-background-primary: #ffffff;
+  --color-background-secondary: #f7f7f8;
+  --color-background-info: #eef5ff;
+  --color-background-warning: #fff7e8;
+  --color-background-danger: #fff0f0;
+  --color-background-success: #effaf3;
+  --color-border-tertiary: #e3e3e6;
+  --color-border-secondary: #c8c8cf;
+  --color-border-danger: #ffb5b5;
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #5f6670;
+  --color-text-tertiary: #8a919b;
+  --color-text-danger: #b42318;
+  --color-text-success: #137333;
+  --color-text-info: #1a5fb4;
+  --color-text-warning: #9a6700;
+  --border-radius-md: 10px;
+  --border-radius-lg: 14px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--color-text-primary);
+  background: #f1f2f4;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--color-background-primary); overscroll-behavior-y: none; }
+button, input, textarea, select { font: inherit; color: inherit; border: 0.5px solid var(--color-border-secondary); border-radius: 8px; background: var(--color-background-primary); }
+button { transition: transform .08s ease, background .15s ease; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input { outline: none; }
+input:focus { border-color: #378ADD; box-shadow: 0 0 0 2px #378add22; }
+strong { font-weight: 600; }
+.app-shell { width: min(1120px, calc(100% - 24px)); margin: 0 auto; padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); padding-bottom: env(safe-area-inset-bottom); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background-primary: #111318;
+    --color-background-secondary: #191c22;
+    --color-background-info: #102033;
+    --color-background-warning: #2b2110;
+    --color-background-danger: #2a1414;
+    --color-background-success: #102416;
+    --color-border-tertiary: #2b3038;
+    --color-border-secondary: #454b55;
+    --color-border-danger: #613131;
+    --color-text-primary: #eef1f5;
+    --color-text-secondary: #bdc4cf;
+    --color-text-tertiary: #8b94a3;
+    --color-text-danger: #ff8f8f;
+    --color-text-success: #7ad58b;
+    --color-text-info: #8bc2ff;
+    --color-text-warning: #ffd166;
+  }
+  body { background: var(--color-background-primary); }
+}
