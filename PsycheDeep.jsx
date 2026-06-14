@@ -10,12 +10,14 @@ const API_URL = "/api/messages";
 const MODEL   = import.meta.env.VITE_OPENAI_MODEL || "gpt-4.1-mini";
 
 const MCPS = {
-  gmail:    { type:"url", url:"https://gmailmcp.googleapis.com/mcp/v1",                      name:"gmail"      },
-  drive:    { type:"url", url:"https://drivemcp.googleapis.com/mcp/v1",                      name:"drive"      },
-  m365:     { type:"url", url:"https://microsoft365.mcp.claude.com/mcp",                     name:"m365"       },
-  proton:   { type:"url", url:"https://github.com/amotivv/protonmail-mcp/blob/main/src/email-service.ts", name:"protonmail" },
-  protonm:  { type:"url", url:"https://mail.proton.me",                                      name:"proton_web" },
-  zapier:   { type:"url", url:"https://mcp.zapier.com/api/v1/connect",                       name:"zapier"     },
+  gmail:    { name:"gmail",           connector_id:"connector_gmail"          },
+  drive:    { name:"drive",           connector_id:"connector_googledrive"    },
+  calendar: { name:"google_calendar", connector_id:"connector_googlecalendar" },
+  m365:     { name:"m365",            connector_id:"connector_outlookemail"   },
+  outlook:  { name:"outlook",         connector_id:"connector_outlookemail"   },
+  teams:    { name:"teams",           connector_id:"connector_microsoftteams" },
+  onedrive: { name:"onedrive",        connector_id:"connector_sharepoint"     },
+  dropbox:  { name:"dropbox",         connector_id:"connector_dropbox"        },
 };
 
 // ── PARSERS ──────────────────────────────────────────────────────────────────
@@ -212,10 +214,12 @@ const FORECAST_SYS = (profile, recentSeries) =>
 // ── SOURCE DEFINITIONS ────────────────────────────────────────────────────────
 
 const SOURCE_DEFS = [
-  { id:"gmail",      label:"Gmail",        icon:"ti-mail",              mcp:true,  mcpKey:"gmail",  accounts:[],  color:"#E24B4A", desc:"Emails enviados y recibidos" },
-  { id:"drive",      label:"Google Drive", icon:"ti-brand-google-drive", mcp:true,  mcpKey:"drive",  accounts:[],  color:"#378ADD", desc:"Documentos, notas, archivos de texto" },
-  { id:"m365",       label:"Microsoft 365",icon:"ti-brand-office",       mcp:true,  mcpKey:"m365",   accounts:[],  color:"#0F6E56", desc:"Outlook, Word, OneNote, Teams" },
-  { id:"proton",     label:"ProtonMail",   icon:"ti-shield-lock",        mcp:true,  mcpKey:"proton", accounts:[],  color:"#7F77DD", desc:"Email cifrado" },
+  { id:"gmail",      label:"Gmail",        icon:"ti-mail",              mcp:true,  mcpKey:"gmail",    provider:"google",    accounts:[],  color:"#E24B4A", desc:"Emails enviados y recibidos" },
+  { id:"drive",      label:"Google Drive", icon:"ti-brand-google-drive", mcp:true,  mcpKey:"drive",    provider:"google",    accounts:[],  color:"#378ADD", desc:"Documentos, notas y archivos de Drive" },
+  { id:"calendar",   label:"Google Calendar", icon:"ti-calendar",       mcp:true,  mcpKey:"calendar", provider:"google",    accounts:[],  color:"#1D9E75", desc:"Eventos de calendario de Google" },
+  { id:"m365",       label:"Outlook Mail", icon:"ti-brand-office",       mcp:true,  mcpKey:"m365",     provider:"microsoft", accounts:[],  color:"#0F6E56", desc:"Correo de Outlook / Microsoft 365" },
+  { id:"onedrive",   label:"OneDrive / SharePoint", icon:"ti-cloud",     mcp:true,  mcpKey:"onedrive", provider:"microsoft", accounts:[],  color:"#0F6E56", desc:"Archivos Microsoft vía conector SharePoint" },
+  { id:"teams",      label:"Microsoft Teams", icon:"ti-brand-teams",     mcp:true,  mcpKey:"teams",    provider:"microsoft", accounts:[],  color:"#6264A7", desc:"Contexto de Teams si el tenant lo permite" },
   { id:"whatsapp",   label:"WhatsApp",     icon:"ti-brand-whatsapp",     mcp:false, upload:".txt",   color:"#1D9E75", desc:"Exporta chat: Ajustes → Chat → Exportar" },
   { id:"twitter",    label:"Twitter / X",  icon:"ti-brand-x",            mcp:false, upload:".js,.json", color:"#2C2C2A", desc:"tweets.js del archivo de Twitter" },
   { id:"instagram",  label:"Instagram",    icon:"ti-brand-instagram",    mcp:false, upload:".json",  color:"#D4537E", desc:"messages_1.json del archivo de Instagram" },
@@ -278,7 +282,7 @@ const CT = { display:"flex", alignItems:"center", gap:8 };
 
 export default function PsycheDeep() {
   const [phase, setPhase]       = useState("config");
-  const [sources, setSources]   = useState(() => Object.fromEntries(SOURCE_DEFS.map(s=>([s.id,{...s,files:[],enabled:s.mcp,itemCount:0,processed:0,status:"idle"}]))));
+  const [sources, setSources]   = useState(() => Object.fromEntries(SOURCE_DEFS.map(s=>([s.id,{...s,files:[],enabled:false,itemCount:0,processed:0,status:"idle"}]))));
   const [urlSources, setUrlSrc] = useState(DEFAULT_URL_SOURCES);
   const [logs,setLogs]          = useState([]);
   const [corpus,setCorpus]      = useState([]);
@@ -291,6 +295,7 @@ export default function PsycheDeep() {
   const [chatBusy,setChatBusy]  = useState(false);
   const [err,setErr]            = useState(null);
   const [connectionStatus,setConnectionStatus] = useState(null);
+  const [oauthStatus,setOauthStatus] = useState(null);
   const [analysisProgress,setAP] = useState({ done:0, total:0 });
   const logsRef = useRef(null);
   const chatRef = useRef(null);
@@ -300,19 +305,41 @@ export default function PsycheDeep() {
     setTimeout(()=>{ if(logsRef.current) logsRef.current.scrollTop=logsRef.current.scrollHeight; },30);
   },[]);
 
-  useEffect(() => {
+  const refreshBackendStatus = useCallback(() => {
     fetch("/api/health")
       .then(r => r.json())
       .then(setConnectionStatus)
       .catch(() => setConnectionStatus({ ok:false, apiKeyConfigured:false, error:"Backend no disponible" }));
+
+    fetch("/api/oauth/status")
+      .then(r => r.json())
+      .then(setOauthStatus)
+      .catch(() => setOauthStatus({ ok:false, providers:{}, connectors:{} }));
   }, []);
+
+  useEffect(() => { refreshBackendStatus(); }, [refreshBackendStatus]);
+
+  const oauthProviderForSource = src => src.provider || (src.id==="gmail"||src.id==="drive"||src.id==="calendar" ? "google" : "microsoft");
+
+  const sourceConnected = src => Boolean(oauthStatus?.connectors?.[src.id]?.connected || oauthStatus?.providers?.[oauthProviderForSource(src)]?.connected);
+
+  const connectSource = src => {
+    const provider = oauthProviderForSource(src);
+    const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
+    window.location.href = `/api/oauth/start/${provider}?target=${encodeURIComponent(src.id)}&return_to=${returnTo}`;
+  };
+
+  const disconnectProvider = async provider => {
+    await fetch(`/api/oauth/logout/${provider}`, { method:"POST" });
+    refreshBackendStatus();
+  };
 
   // ── INGEST ──────────────────────────────────────────────────────────────────
 
   const ingestMCP = async (srcId, mcpKey) => {
-    log(`↗ Conectando ${srcId.toUpperCase()} MCP...`, "tool");
+    log(`↗ Conectando ${srcId.toUpperCase()} vía OAuth/OpenAI connector...`, "tool");
     const mcp = MCPS[mcpKey];
-    if (!mcp) { log(`  ${srcId}: MCP no disponible`, "warn"); return []; }
+    if (!mcp) { log(`  ${srcId}: conector no disponible`, "warn"); return []; }
     const items = [];
     let pageToken = null;
     let round = 0;
@@ -527,14 +554,28 @@ export default function PsycheDeep() {
         Activa cada fuente conectada o sube archivos exportados. El sistema leerá <strong>todos</strong> los datos disponibles (no solo los últimos), construirá series temporales trimestrales e inferirá patrones, desencadenantes y predicciones de baja granularidad.
       </p>
 
-      {connectionStatus&&(<div style={{ margin:"0 0 1rem", padding:"10px 14px", borderRadius:"var(--border-radius-md)", background:connectionStatus.apiKeyConfigured?"var(--color-background-success)":"var(--color-background-warning)", border:"0.5px solid var(--color-border-tertiary)", fontSize:12, color:"var(--color-text-secondary)", lineHeight:1.55 }}>
-        <strong>{connectionStatus.apiKeyConfigured?"Backend conectado a OpenAI":"Backend activo, falta OPENAI_API_KEY"}</strong>
+      {connectionStatus&&(<div style={{ margin:"0 0 1rem", padding:"10px 14px", borderRadius:"var(--border-radius-md)", background:(connectionStatus.apiKeyConfigured||connectionStatus.openai?.key_present)?"var(--color-background-success)":"var(--color-background-warning)", border:"0.5px solid var(--color-border-tertiary)", fontSize:12, color:"var(--color-text-secondary)", lineHeight:1.55 }}>
+        <strong>{(connectionStatus.apiKeyConfigured||connectionStatus.openai?.key_present)?"Backend conectado a OpenAI":"Backend activo, falta OPENAI_API_SECRET"}</strong>
         <br />
-        Proveedor: {connectionStatus.provider||"OpenAI"} · Modelo: {connectionStatus.model||MODEL}
+        Proveedor: {connectionStatus.provider||"OpenAI"} · Modelo: {connectionStatus.model||connectionStatus.openai?.model||MODEL}
+        <br />
+        Secret esperado: {connectionStatus.openai?.expected_secret_file_path || "/etc/secrets/OPENAI_API_SECRET"}
+      </div>)}
+
+      {oauthStatus&&(<div style={{ margin:"0 0 1rem", padding:"10px 14px", borderRadius:"var(--border-radius-md)", background:"var(--color-background-secondary)", border:"0.5px solid var(--color-border-tertiary)", fontSize:12, color:"var(--color-text-secondary)", lineHeight:1.65 }}>
+        <strong>OAuth de usuario</strong>
+        <br />
+        Google: {oauthStatus.providers?.google?.connected?"conectado":"no conectado"} · Microsoft: {oauthStatus.providers?.microsoft?.connected?"conectado":"no conectado"}
+        <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
+          <button type="button" onClick={()=>{ window.location.href=`/api/oauth/start/google?target=google&return_to=${encodeURIComponent(window.location.pathname+window.location.search)}`; }} style={{ fontSize:11, padding:"4px 8px", cursor:"pointer" }}>Conectar Google</button>
+          <button type="button" onClick={()=>{ window.location.href=`/api/oauth/start/microsoft?target=microsoft&return_to=${encodeURIComponent(window.location.pathname+window.location.search)}`; }} style={{ fontSize:11, padding:"4px 8px", cursor:"pointer" }}>Conectar Microsoft</button>
+          {oauthStatus.providers?.google?.connected&&<button type="button" onClick={()=>disconnectProvider("google")} style={{ fontSize:11, padding:"4px 8px", cursor:"pointer" }}>Desconectar Google</button>}
+          {oauthStatus.providers?.microsoft?.connected&&<button type="button" onClick={()=>disconnectProvider("microsoft")} style={{ fontSize:11, padding:"4px 8px", cursor:"pointer" }}>Desconectar Microsoft</button>}
+        </div>
       </div>)}
 
       {/* Connected MCPs */}
-      <p style={{ fontSize:11, fontWeight:500, color:"var(--color-text-tertiary)", margin:"0 0 8px", letterSpacing:"0.05em" }}>FUENTES CONECTADAS VÍA MCP</p>
+      <p style={{ fontSize:11, fontWeight:500, color:"var(--color-text-tertiary)", margin:"0 0 8px", letterSpacing:"0.05em" }}>FUENTES CONECTADAS VÍA OAUTH</p>
       {SOURCE_DEFS.filter(s=>s.mcp).map(src=>(
         <div key={src.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", marginBottom:6, background:"var(--color-background-secondary)", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-tertiary)" }}>
           <i className={`ti ${src.icon}`} style={{ fontSize:18, color:src.color, flexShrink:0 }} aria-hidden />
@@ -542,12 +583,16 @@ export default function PsycheDeep() {
             <p style={{ margin:0, fontSize:13, fontWeight:500 }}>{src.label}</p>
             <p style={{ margin:0, fontSize:11, color:"var(--color-text-tertiary)" }}>{src.desc}</p>
           </div>
-          <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }}>
-            <input type="checkbox" checked={sources[src.id].enabled}
-              onChange={e=>setSources(p=>({...p,[src.id]:{...p[src.id],enabled:e.target.checked}}))}
-              style={{ width:14, height:14, accentColor:src.color }} />
-            <span style={{ fontSize:11, color:"var(--color-text-secondary)" }}>activar</span>
-          </label>
+          <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+            <Tag color={sourceConnected(src)?"var(--color-text-success)":"var(--color-text-warning)"} bg={sourceConnected(src)?"var(--color-background-success)":"var(--color-background-warning)"}>{sourceConnected(src)?"OAuth OK":"OAuth pendiente"}</Tag>
+            <button type="button" onClick={()=>connectSource(src)} style={{ fontSize:11, padding:"4px 8px", cursor:"pointer" }}>{sourceConnected(src)?"Reconectar":"Conectar"}</button>
+            <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }}>
+              <input type="checkbox" checked={sources[src.id].enabled}
+                onChange={e=>setSources(p=>({...p,[src.id]:{...p[src.id],enabled:e.target.checked}}))}
+                style={{ width:14, height:14, accentColor:src.color }} />
+              <span style={{ fontSize:11, color:"var(--color-text-secondary)" }}>activar</span>
+            </label>
+          </div>
         </div>
       ))}
 
@@ -601,7 +646,7 @@ export default function PsycheDeep() {
       <div style={{ margin:"1rem 0", padding:"10px 14px", borderRadius:"var(--border-radius-md)", border:"0.5px solid var(--color-border-tertiary)", background:"var(--color-background-secondary)" }}>
         <p style={{ margin:0, fontSize:12, color:"var(--color-text-secondary)", lineHeight:1.6 }}>
           <i className="ti ti-info-circle" style={{ fontSize:14, verticalAlign:-2, marginRight:5 }} aria-hidden />
-          Para múltiples cuentas de Gmail, Drive, etc., conecta cada cuenta adicional en tu backend → .env / OAuth / conectores. Cada cuenta aparecerá como una fuente separada.
+          Para Gmail, Drive, Calendar, Outlook, Teams y OneDrive/SharePoint se usa OAuth real: pulsa Conectar, autoriza en Google/Microsoft y el backend pasará el access token a OpenAI solo durante la petición.
         </p>
       </div>
 
@@ -1022,3 +1067,4 @@ export default function PsycheDeep() {
     </div>
   );
 }
+
