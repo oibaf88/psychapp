@@ -23,6 +23,24 @@ GOOGLE_COOKIE_ID=
 
 The backend stores all OAuth provider sessions in the same encrypted HttpOnly cookie named `psychapp_oauth`.
 
+## Critical rule about scopes
+
+Do **not** set `GOOGLE_SCOPES` or `MICROSOFT_SCOPES` in Render while debugging.
+
+The backend uses safe built-in scopes. Custom scopes are ignored unless this is explicitly set:
+
+```env
+ALLOW_CUSTOM_OAUTH_SCOPES=true
+```
+
+Keep it unset or false:
+
+```env
+ALLOW_CUSTOM_OAUTH_SCOPES=false
+```
+
+This prevents accidental invalid scopes caused by putting token URLs, validation URLs, Graph URLs, or callback URLs into a scope field.
+
 ## Required runtime variables on Render
 
 ```env
@@ -31,6 +49,7 @@ PORT=10000
 PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
 OAUTH_COOKIE_SECRET=CHANGE_ME_LONG_RANDOM_STRING
 MCP_REQUIRE_APPROVAL=never
+ALLOW_CUSTOM_OAUTH_SCOPES=false
 ```
 
 `PUBLIC_BASE_URL` must not have a trailing slash.
@@ -59,17 +78,6 @@ Contents: sk-proj-...
 Mounted path: /etc/secrets/OPENAI_API_SECRET
 ```
 
-Accepted OpenAI env/secret names in the backend:
-
-```env
-OPENAI_API_KEY=
-OPENAI_API_SECRET=
-OPENAI_KEY=
-openai_api_key=
-openai_api_secret=
-openai_key=
-```
-
 Normal model settings:
 
 ```env
@@ -95,10 +103,17 @@ GOOGLE_OAUTH_CLIENT_SECRET=...
 GOOGLE_OAUTH_REDIRECT_URI=...
 ```
 
-Optional scope override. Leave commented unless debugging:
+Do not set `GOOGLE_SCOPES` unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
 
-```env
-# GOOGLE_SCOPES=openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.readonly
+Built-in Google scopes used by the backend:
+
+```text
+openid
+email
+profile
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/drive.readonly
+https://www.googleapis.com/auth/calendar.readonly
 ```
 
 Google redirect URI to register in Google Cloud Console:
@@ -115,6 +130,7 @@ Preferred names:
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_TENANT=consumers
 ```
 
 Accepted aliases:
@@ -136,31 +152,32 @@ Microsoft redirect URI to register in Microsoft Entra:
 https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
 ```
 
-## Microsoft tenant and scopes
-
-The backend now reads:
-
-```env
-MICROSOFT_TENANT=consumers
-```
-
 For personal Outlook/Hotmail/Live accounts, keep:
 
 ```env
 MICROSOFT_TENANT=consumers
 ```
 
-The backend default Microsoft scope set is personal-account safe and uses full Microsoft Graph scope names:
+Do not set `MICROSOFT_SCOPES` unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
 
-```env
-MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
-```
-
-Do not add these while debugging personal accounts:
+Built-in Microsoft scopes used by the backend:
 
 ```text
-https://graph.microsoft.com/Sites.Read.All
-https://graph.microsoft.com/Team.ReadBasic.All
+openid
+profile
+email
+offline_access
+User.Read
+Mail.Read
+Files.Read.All
+Calendars.Read
+```
+
+Do not add SharePoint or Teams while debugging personal accounts:
+
+```text
+Sites.Read.All
+Team.ReadBasic.All
 ```
 
 Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams.
@@ -185,9 +202,7 @@ Paste the generated string into Render as:
 OAUTH_COOKIE_SECRET=generated_string_here
 ```
 
-## Current expected Render variables
-
-A complete minimal Render setup should look like:
+## Current minimal Render variables
 
 ```env
 NODE_VERSION=22.22.0
@@ -197,6 +212,7 @@ OAUTH_COOKIE_SECRET=generated_string_here
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
 MCP_REQUIRE_APPROVAL=never
+ALLOW_CUSTOM_OAUTH_SCOPES=false
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/google
@@ -204,7 +220,6 @@ MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/microsoft
 MICROSOFT_TENANT=consumers
-MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
 ```
 
 Plus Render Secret File:
@@ -212,3 +227,22 @@ Plus Render Secret File:
 ```text
 OPENAI_API_SECRET
 ```
+
+## Variables to remove from Render while debugging
+
+Remove or leave unset:
+
+```env
+GOOGLE_SCOPES=
+MICROSOFT_SCOPES=
+GOOGLE_TOKEN_URL=
+MICROSOFT_TOKEN_URL=
+GOOGLE_VALIDATION_URL=
+MICROSOFT_VALIDATION_URL=
+GOOGLE_AUTHORIZATION_URL=
+MICROSOFT_AUTHORIZATION_URL=
+GOOGLE_COOKIE_SECRET=
+MICROSOFT_COOKIE_SECRET=
+```
+
+The backend already knows the provider authorization and token endpoints. PsychApp is the OAuth client; Google and Microsoft are the OAuth providers.
