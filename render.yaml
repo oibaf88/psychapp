@@ -1,20 +1,14 @@
 services:
   - type: web
     name: psyche-deep-openai
-    runtime: node
-    buildCommand: npm install --no-audit --no-fund && npm run build
+    env: node
+    buildCommand: npm install && npm run build
     startCommand: npm start
-    healthCheckPath: /api/health
     envVars:
-      - key: NODE_VERSION
-        value: 22.22.0
-      - key: NPM_CONFIG_AUDIT
-        value: "false"
-      - key: NPM_CONFIG_FUND
-        value: "false"
       - key: OPENAI_MODEL
         value: gpt-4.1-mini
       - key: OPENAI_STORE
         value: "false"
       - key: OPENAI_API_KEY
         sync: false
+
