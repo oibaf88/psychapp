@@ -12,6 +12,19 @@ const PORT = Number(process.env.PORT || 4173);
 const OPENAI_URL = process.env.OPENAI_URL || 'https://api.openai.com/v1/responses';
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 25 * 1024 * 1024);
+const SECRET_DIR = process.env.RENDER_SECRET_DIR || '/etc/secrets';
+
+const CONNECTOR_BY_LABEL = {
+  gmail: 'connector_gmail',
+  drive: 'connector_googledrive',
+  m365: 'connector_outlookemail',
+  outlook: 'connector_outlookemail',
+  calendar: 'connector_googlecalendar',
+  google_calendar: 'connector_googlecalendar',
+  teams: 'connector_microsoftteams',
+  sharepoint: 'connector_sharepoint',
+  dropbox: 'connector_dropbox'
+};
 
 function loadDotEnv(file) {
   if (!fs.existsSync(file)) return;
@@ -38,24 +51,54 @@ function readSecretFile(filePath) {
   }
 }
 
-function getOpenAIKey() {
-  const direct = String(process.env.OPENAI_API_KEY || '').trim();
-  if (direct) return direct;
-
-  const candidates = [
-    process.env.OPENAI_API_KEY_FILE,
-    process.env.OPENAI_SECRET_FILE,
-    '/etc/secrets/openai_api_key',
-    '/etc/secrets/OPENAI_API_KEY',
-    path.join(ROOT, 'openai_api_key'),
-    path.join(ROOT, 'OPENAI_API_KEY')
-  ].filter(Boolean);
-
-  for (const filePath of candidates) {
-    const value = readSecretFile(filePath);
-    if (value) return value;
+function normalizeSecret(raw, keyNames = []) {
+  let text = String(raw || '').trim();
+  if (!text) return '';
+  if (text.startsWith('Bearer ')) text = text.slice(7).trim();
+  for (const keyName of keyNames) {
+    if (text.startsWith(`${keyName}=`)) text = text.slice(keyName.length + 1).trim();
+    if (text.startsWith(`${keyName}:`)) text = text.slice(keyName.length + 1).trim();
   }
-  return '';
+  return text.replace(/^['"]|['"]$/g, '').trim();
+}
+
+function safeSecretFiles() {
+  try {
+    if (!fs.existsSync(SECRET_DIR)) return [];
+    return fs.readdirSync(SECRET_DIR).filter(name => !name.startsWith('.')).sort();
+  } catch {
+    return [];
+  }
+}
+
+function findSecret(names) {
+  for (const name of names) {
+    const env = normalizeSecret(process.env[name], names);
+    if (env) return { value: env, source: `env:${name}` };
+  }
+  for (const name of names) {
+    const candidates = [
+      path.join(SECRET_DIR, name),
+      path.join(SECRET_DIR, name.toLowerCase()),
+      path.join(SECRET_DIR, `${name}.txt`),
+      path.join(SECRET_DIR, `${name.toLowerCase()}.txt`),
+      path.join(ROOT, name),
+      path.join(ROOT, name.toLowerCase())
+    ];
+    for (const filePath of candidates) {
+      const file = normalizeSecret(readSecretFile(filePath), names);
+      if (file) return { value: file, source: `file:${filePath}` };
+    }
+  }
+  return { value: '', source: '' };
+}
+
+function getOpenAIKeyWithMeta() {
+  return findSecret(['OPENAI_API_KEY', 'OPENAI_KEY', 'openai_api_key', 'openai_key']);
+}
+
+function getOpenAIKey() {
+  return getOpenAIKeyWithMeta().value;
 }
 
 function sendJson(res, status, payload) {
@@ -91,6 +134,47 @@ function sanitizeServerName(name) {
   return String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
+function normalizeLabel(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+
+function connectorForServer(srv) {
+  if (srv?.connector_id) return srv.connector_id;
+  const label = normalizeLabel(srv?.name || srv?.server_label || srv?.id || '');
+  if (CONNECTOR_BY_LABEL[label]) return CONNECTOR_BY_LABEL[label];
+  const url = String(srv?.url || srv?.server_url || '').toLowerCase();
+  if (url.includes('gmail')) return 'connector_gmail';
+  if (url.includes('drive')) return 'connector_googledrive';
+  if (url.includes('calendar')) return 'connector_googlecalendar';
+  if (url.includes('microsoft') || url.includes('outlook') || url.includes('m365')) return 'connector_outlookemail';
+  if (url.includes('dropbox')) return 'connector_dropbox';
+  return '';
+}
+
+function tokenNamesFor(label, connectorId = '') {
+  const clean = sanitizeServerName(label);
+  const connector = sanitizeServerName(String(connectorId || '').replace(/^connector_/, ''));
+  const names = [
+    `MCP_TOKEN_${clean}`,
+    `MCP_AUTH_${clean}`,
+    `${clean}_OAUTH_ACCESS_TOKEN`,
+    `${clean}_ACCESS_TOKEN`,
+    `${clean}_TOKEN`
+  ];
+  if (connector) {
+    names.push(`MCP_TOKEN_${connector}`, `${connector}_OAUTH_ACCESS_TOKEN`, `${connector}_ACCESS_TOKEN`, `${connector}_TOKEN`);
+  }
+  if (connectorId === 'connector_gmail') names.push('GMAIL_OAUTH_ACCESS_TOKEN', 'GOOGLE_GMAIL_OAUTH_ACCESS_TOKEN', 'GOOGLE_OAUTH_ACCESS_TOKEN');
+  if (connectorId === 'connector_googledrive') names.push('GOOGLE_DRIVE_OAUTH_ACCESS_TOKEN', 'GOOGLE_OAUTH_ACCESS_TOKEN');
+  if (connectorId === 'connector_googlecalendar') names.push('GOOGLE_CALENDAR_OAUTH_ACCESS_TOKEN', 'GOOGLE_OAUTH_ACCESS_TOKEN');
+  if (connectorId === 'connector_outlookemail') names.push('OUTLOOK_OAUTH_ACCESS_TOKEN', 'MICROSOFT_OAUTH_ACCESS_TOKEN', 'M365_OAUTH_ACCESS_TOKEN');
+  return [...new Set(names)];
+}
+
+function getOAuthTokenWithMeta(label, connectorId = '') {
+  return findSecret(tokenNamesFor(label, connectorId));
+}
+
 function extractOutputText(data) {
   if (!data) return '';
   if (typeof data.output_text === 'string') return data.output_text;
@@ -119,16 +203,32 @@ function convertTools(legacyTools = [], mcpServers = []) {
   if (wantsWeb) tools.push({ type: 'web_search' });
 
   for (const srv of mcpServers) {
-    if (!srv || typeof srv.url !== 'string' || !srv.url.startsWith('https://')) continue;
-    const label = String(srv.name || srv.server_label || 'mcp').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const token = process.env[`MCP_TOKEN_${sanitizeServerName(label)}`] || process.env[`MCP_AUTH_${sanitizeServerName(label)}`];
+    if (!srv) continue;
+    const label = String(srv.name || srv.server_label || srv.id || 'mcp').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const connectorId = connectorForServer(srv);
+    const tokenInfo = getOAuthTokenWithMeta(label, connectorId);
+
+    if (connectorId) {
+      const tool = {
+        type: 'mcp',
+        server_label: label,
+        connector_id: connectorId,
+        require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
+      };
+      if (tokenInfo.value) tool.authorization = tokenInfo.value.startsWith('Bearer ') ? tokenInfo.value : `Bearer ${tokenInfo.value}`;
+      tools.push(tool);
+      continue;
+    }
+
+    const serverUrl = srv.url || srv.server_url;
+    if (typeof serverUrl !== 'string' || !serverUrl.startsWith('https://')) continue;
     const tool = {
       type: 'mcp',
       server_label: label,
-      server_url: srv.url,
+      server_url: serverUrl,
       require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
     };
-    if (token) tool.authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+    if (tokenInfo.value) tool.authorization = tokenInfo.value.startsWith('Bearer ') ? tokenInfo.value : `Bearer ${tokenInfo.value}`;
     tools.push(tool);
   }
   return tools;
@@ -189,10 +289,14 @@ async function handleMessages(req, res) {
     const mock = maybeMock(body);
     if (mock) return sendJson(res, 200, mock);
 
-    const key = getOpenAIKey();
+    const keyInfo = getOpenAIKeyWithMeta();
+    const key = keyInfo.value;
     if (!key) {
       return sendJson(res, 500, {
-        error: { message: 'Falta clave OpenAI. Configura OPENAI_API_KEY o crea un Render Secret File llamado openai_api_key con la clave dentro.' }
+        error: {
+          message: 'Falta clave OpenAI. Configura OPENAI_API_KEY o crea un Render Secret File llamado openai_api_key con la clave dentro.',
+          diagnostic: publicDiagnostics()
+        }
       });
     }
 
@@ -215,6 +319,47 @@ async function handleMessages(req, res) {
   } catch (err) {
     sendJson(res, err.status || 500, { error: { message: err.message || 'Error interno' } });
   }
+}
+
+function tokenPresenceSummary() {
+  const labels = [
+    ['gmail', 'connector_gmail'],
+    ['drive', 'connector_googledrive'],
+    ['google_calendar', 'connector_googlecalendar'],
+    ['m365', 'connector_outlookemail'],
+    ['dropbox', 'connector_dropbox']
+  ];
+  return Object.fromEntries(labels.map(([label, connector]) => {
+    const info = getOAuthTokenWithMeta(label, connector);
+    return [label, { present: Boolean(info.value), source: info.source ? info.source.replace(/:.+$/, ':***') : '' }];
+  }));
+}
+
+function publicDiagnostics() {
+  const keyInfo = getOpenAIKeyWithMeta();
+  return {
+    ok: true,
+    provider: 'openai',
+    mock: process.env.MOCK_AI === 'true',
+    node: process.version,
+    openai: {
+      key_present: Boolean(keyInfo.value),
+      key_source: keyInfo.source ? keyInfo.source.replace(/:.+$/, ':***') : '',
+      model: DEFAULT_MODEL,
+      url: OPENAI_URL,
+      store: process.env.OPENAI_STORE === 'true'
+    },
+    secrets: {
+      dir: SECRET_DIR,
+      dir_exists: fs.existsSync(SECRET_DIR),
+      files: safeSecretFiles()
+    },
+    oauth_tokens: tokenPresenceSummary(),
+    notes: [
+      'Este endpoint no muestra valores secretos, solo presencia y nombres de archivo.',
+      'Los conectores OpenAI requieren OAuth access tokens generados aparte; Render Secret Files solo los guarda.'
+    ]
+  };
 }
 
 function serveStatic(req, res) {
@@ -252,11 +397,12 @@ function mime(file) {
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
   const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
-  if (pathname === '/api/health') return sendJson(res, 200, { ok: true, provider: 'openai', mock: process.env.MOCK_AI === 'true', has_openai_key: Boolean(getOpenAIKey()) });
+  if (pathname === '/api/health') return sendJson(res, 200, publicDiagnostics());
+  if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics());
   if (pathname === '/api/messages' && req.method === 'POST') return handleMessages(req, res);
   return serveStatic(req, res);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Psyche Deep listening on http://0.0.0.0:${PORT}`);
+  console.log(`Psyche Deep running on http://0.0.0.0:${PORT}`);
 });
