@@ -1,8 +1,8 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import PsycheDeep from './PsycheDeep.jsx';
+import PsycheDeep from './_src/PsycheDeep.jsx';
 import '@tabler/icons-webfont/dist/tabler-icons.min.css';
-import './styles.css';
+import './_src/styles.css';
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
