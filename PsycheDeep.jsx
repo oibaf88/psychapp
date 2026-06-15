@@ -120,34 +120,37 @@ const INGEST_SYS = `You have access to data sources via MCP tools. Your task:
 Return: {"items":[{"id":"...","date":"ISO8601","content":"snippet max 300 chars","source":"...","meta":{}}],"next_page_token":null_or_string,"total_estimated":number}`;
 
 const SCRAPE_SYS = (platform, handle, url) => `You are a data extraction agent with web_search and web_fetch capabilities.
-Extract the maximum possible public content from this ${platform} profile: ${url} (handle: @${handle}).
+Extract the maximum possible public posts from this ${platform} profile: ${url} (handle: @${handle}).
 
-STRATEGY — try ALL of these in order until you find data:
-${platform==="twitter" ? `
-1. web_fetch "https://nitter.privacydev.net/${handle}" — parse <div class="tweet-content"> blocks
-2. web_fetch "https://nitter.poast.org/${handle}" as backup nitter
-3. web_search query: "${handle} site:x.com" → fetch each result URL
-4. web_search query: "${handle} twitter" → fetch top results for cached tweets
-5. web_fetch "https://x.com/${handle}" — extract any JSON-LD or embedded data` : `
-1. web_fetch "https://www.instagram.com/${handle}/" — look for window._sharedData or __additionalDataLoaded JSON in source
-2. web_fetch "https://picuki.com/profile/${handle}" — parse post blocks
-3. web_fetch "https://www.instagram.com/${handle}/?__a=1&__d=dis" — JSON endpoint
-4. web_search query: "${handle} site:instagram.com" → fetch result pages
-5. web_search query: "${handle} instagram posts" → extract post content from cached pages`}
+Try ALL strategies below in order. Skip to the next immediately if a source returns an error, redirect, login wall, or empty content.
 
-EXTRACTION: For each post found extract: full text, date/time, engagement (likes/retweets/comments if available).
-Deduplicate. Sort by date ascending.
+${platform==="twitter" ? `TWITTER/X STRATEGIES:
+1. web_search query: "from:${handle}" — search engines index public tweets; collect all result snippets
+2. web_search query: "${handle} site:x.com" — find direct tweet URLs, then web_fetch each one
+3. web_fetch "https://nitter.privacydev.net/${handle}" — alt Twitter frontend; parse <div class="tweet-content">
+4. web_fetch "https://nitter.poast.org/${handle}" — backup nitter instance
+5. web_fetch "https://nitter.1d4.us/${handle}" — another nitter instance
+6. web_search query: "tweets ${handle} 2024 OR 2025 OR 2026" — find cached/aggregated tweet pages` : `INSTAGRAM STRATEGIES:
+1. web_search query: "${handle} site:instagram.com" — search-engine indexed posts; extract all snippets
+2. web_fetch "https://imginn.com/${handle}/" — Instagram viewer; parse post text and dates
+3. web_fetch "https://dumpor.com/user/${handle}" — alternative Instagram viewer
+4. web_fetch "https://picuki.com/profile/${handle}" — parse post caption blocks
+5. web_search query: "${handle} instagram posts 2024 OR 2025 OR 2026" — find cached/aggregated pages`}
 
-Return ONLY valid JSON — no markdown, no preamble:
+EXTRACTION RULES:
+- For each post: extract full text, publication date/time (ISO 8601), and engagement numbers if visible.
+- Deduplicate by content similarity. Sort by date ascending.
+- Include posts even if date is approximate (use first of month if only month/year known).
+
+IMPORTANT: Always return valid JSON even when no posts are found. Use this exact structure:
 {
-  "items": [
-    {"date":"ISO8601","content":"full post text","source":"${platform}","url":"post url or empty","engagement":{"likes":0,"retweets":0,"comments":0}}
-  ],
-  "total_found": number,
+  "items": [{"date":"ISO8601","content":"full post text","source":"${platform}","url":"post url or empty string","engagement":{"likes":0,"retweets":0,"comments":0}}],
+  "total_found": 0,
   "data_quality": "none|poor|moderate|good",
-  "sources_tried": ["url1","url2"],
-  "notes": "brief description of what worked and what didn't"
-}`;
+  "sources_tried": ["source1","source2"],
+  "notes": "brief description of what worked or failed"
+}
+If nothing found, return {"items":[],"total_found":0,"data_quality":"none","sources_tried":[...],"notes":"reason"}.`;
 
 const PERIOD_SYS = `You are a computational psychologist. Analyze the messages provided and extract features for THIS time period only.
 Return ONLY valid JSON:

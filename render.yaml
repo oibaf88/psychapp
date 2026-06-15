@@ -5,10 +5,49 @@ services:
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
+      # ── OpenAI ──────────────────────────────────────────────────────────────
       - key: OPENAI_MODEL
         value: gpt-4.1-mini
       - key: OPENAI_STORE
         value: "false"
       - key: OPENAI_API_KEY
+        sync: false          # set in Render dashboard; prefer Secret File instead
+
+      # ── App base URL (required for OAuth redirect URIs) ──────────────────────
+      # Set this to your Render service URL, e.g. https://psyche-deep-openai.onrender.com
+      # or your custom domain if you have one configured.
+      - key: PUBLIC_BASE_URL
         sync: false
 
+      # ── Cookie encryption secret (required) ─────────────────────────────────
+      # Generate with: openssl rand -base64 48
+      - key: OAUTH_COOKIE_SECRET
+        sync: false
+
+      # ── Google OAuth ─────────────────────────────────────────────────────────
+      # From Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false          # https://YOUR-APP.onrender.com/api/oauth/callback/google
+
+      # ── Microsoft OAuth ──────────────────────────────────────────────────────
+      # From Azure Portal → Microsoft Entra ID → App registrations
+      # Use "consumers" for personal Microsoft accounts (Outlook/Hotmail/Live)
+      # Use "common" to support both personal and work/school accounts
+      - key: MICROSOFT_TENANT
+        value: consumers
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_REDIRECT_URI
+        sync: false          # https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+
+      # ── Runtime ──────────────────────────────────────────────────────────────
+      - key: MCP_REQUIRE_APPROVAL
+        value: never
+      - key: ALLOW_CUSTOM_OAUTH_SCOPES
+        value: "false"
