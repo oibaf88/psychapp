@@ -106,6 +106,7 @@ function loadDotEnv(file) {
 }
 
 function readScopesFromEnv(name, fallback) {
+  if (process.env.ALLOW_CUSTOM_OAUTH_SCOPES !== 'true') return fallback;
   const raw = String(process.env[name] || '').trim();
   if (!raw) return fallback;
   const scopes = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -480,8 +481,31 @@ async function handleOAuthCallback(req, res, providerName) {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'application/json'
     },
-    body: tokenParams.toString()
+    body: tokenParams.toString(),
+    redirect: 'manual'
   });
+
+  // 3xx from a token endpoint always means a configuration problem (wrong redirect_uri,
+  // wrong tenant, app not enabled for this account type, etc.) — never follow it because
+  // the destination is an HTML error/login page, not a JSON token response.
+  if (tokenResponse.status >= 300 && tokenResponse.status < 400) {
+    const location = (tokenResponse.headers.get('location') || '').slice(0, 300);
+    const redirectPayload = {
+      ok: false,
+      provider: providerName,
+      token_endpoint: provider.tokenUrl,
+      token_status: tokenResponse.status,
+      error: {
+        message: `${provider.label} token endpoint redirected (HTTP ${tokenResponse.status}) instead of returning a token. ` +
+          `Most common cause: the redirect URI "${redirectUriFor(req, providerName)}" is not registered in your ${provider.label} app, ` +
+          (providerName === 'microsoft' ? `or the app does not support "${MICROSOFT_TENANT}" accounts. ` : '') +
+          `Check your ${provider.label} app registration and make sure the redirect URI matches exactly (including https://).`,
+        redirect_location: location
+      }
+    };
+    return oauthReply(req, res, 400, redirectPayload, 'OAuth configuration error', escapeHtml(redirectPayload.error.message), '/');
+  }
+
   const tokenText = await tokenResponse.text();
   const tokenContentType = tokenResponse.headers.get('content-type') || '';
   let tokenJson;
@@ -489,6 +513,13 @@ async function handleOAuthCallback(req, res, providerName) {
 
   if (!tokenResponse.ok || !tokenJson) {
     const firstBytes = tokenText.slice(0, 300);
+    const isHtml = tokenContentType.includes('text/html') || firstBytes.trimStart().startsWith('<');
+    const htmlHint = isHtml
+      ? ` ${provider.label} returned an HTML page — the most common causes are: ` +
+        `(1) redirect URI "${redirectUriFor(req, providerName)}" not registered in ${provider.label} app, ` +
+        (providerName === 'microsoft' ? `(2) app not enabled for "${MICROSOFT_TENANT}" accounts (check "Supported account types" in Azure), ` : '') +
+        `(3) client_id or client_secret is wrong.`
+      : '';
     const payload = {
       ok: false,
       provider: providerName,
@@ -496,7 +527,7 @@ async function handleOAuthCallback(req, res, providerName) {
       token_status: tokenResponse.status,
       token_content_type: tokenContentType,
       error: {
-        message: tokenJson?.error_description || tokenJson?.error || (tokenJson ? `HTTP ${tokenResponse.status}` : 'Token endpoint did not return JSON'),
+        message: (tokenJson?.error_description || tokenJson?.error || (tokenJson ? `HTTP ${tokenResponse.status}` : 'Token endpoint did not return JSON')) + htmlHint,
         aadsts: extractAadsts(tokenJson?.error_description || tokenText),
         non_json_response_preview: tokenJson ? undefined : firstBytes
       }
