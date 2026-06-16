@@ -10,6 +10,21 @@ Do **not** configure PsychApp as a credential validation endpoint, issuer URL, t
 
 That means the caller expected JSON but received the PWA `index.html` or an HTML OAuth result page.
 
+## Canonical production URL
+
+PsychApp is currently hosted at:
+
+```text
+https://psychapp.bfab.io
+```
+
+Register these callback URLs exactly:
+
+```text
+Google:    https://psychapp.bfab.io/api/oauth/callback/google
+Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
+```
+
 ## Correct Microsoft endpoints
 
 For personal Microsoft accounts such as Outlook.com, Hotmail, and Live:
@@ -33,33 +48,35 @@ https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuratio
 Register this as the redirect URI / reply URL in Microsoft Entra:
 
 ```text
-https://pyschapp.onrender.com/api/oauth/callback/microsoft
+https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 Register this as the redirect URI in Google Cloud Console:
 
 ```text
-https://pyschapp.onrender.com/api/oauth/callback/google
+https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 ## Render variables
 
 ```env
-PUBLIC_BASE_URL=https://pyschapp.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=<long-random-string>
 MICROSOFT_TENANT=consumers
 MICROSOFT_CLIENT_ID=<application-client-id>
 MICROSOFT_CLIENT_SECRET=<client-secret-value>
-MICROSOFT_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/microsoft
-MICROSOFT_SCOPES=openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/Calendars.Read
+MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
+ALLOW_CUSTOM_OAUTH_SCOPES=false
 GOOGLE_CLIENT_ID=<google-client-id>
 GOOGLE_CLIENT_SECRET=<google-client-secret>
-GOOGLE_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/google
+GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 ```
+
+Do not set `MICROSOFT_SCOPES` or `GOOGLE_SCOPES` while debugging unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
 
 ## JSON callback mode
 
-The updated server accepts both `GET` and `POST` on:
+The server accepts both `GET` and `POST` on:
 
 ```text
 /api/oauth/callback/google
@@ -81,11 +98,9 @@ Accept: application/json
 Example:
 
 ```text
-https://pyschapp.onrender.com/api/oauth/callback/microsoft?json=1
+https://psychapp.bfab.io/api/oauth/callback/microsoft?json=1
 ```
 
 ## Important
 
 Do not paste the authorization `code=` URL into chats or issue trackers. It is a temporary credential.
-
-
