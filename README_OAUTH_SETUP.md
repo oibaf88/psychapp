@@ -2,6 +2,21 @@
 
 This version replaces stored provider access tokens with real OAuth redirect flows.
 
+## Canonical production URL
+
+PsychApp is currently hosted at:
+
+```text
+https://psychapp.bfab.io
+```
+
+Canonical redirect URIs:
+
+```text
+Google:    https://psychapp.bfab.io/api/oauth/callback/google
+Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
+```
+
 ## Runtime design
 
 - The OpenAI API key remains server-side. In Render, use a Secret File named `OPENAI_API_SECRET` mounted at `/etc/secrets/OPENAI_API_SECRET`.
@@ -35,9 +50,10 @@ Optional environment variables:
 ```env
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
-PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=generate-a-long-random-string
 MCP_REQUIRE_APPROVAL=never
+ALLOW_CUSTOM_OAUTH_SCOPES=false
 ```
 
 ### Google OAuth app
@@ -45,7 +61,7 @@ MCP_REQUIRE_APPROVAL=never
 Create a Google OAuth Web application client and set authorized redirect URI:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/callback/google
+https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 Render variables:
@@ -53,6 +69,7 @@ Render variables:
 ```env
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 Google scopes requested by the app:
@@ -71,17 +88,19 @@ https://www.googleapis.com/auth/calendar.readonly
 Create a Microsoft Entra app registration and set redirect URI:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 Render variables:
 
 ```env
+MICROSOFT_TENANT=consumers
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
+MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
-Microsoft scopes requested by the app:
+Microsoft scopes requested by the app for personal Outlook/Hotmail/Live accounts:
 
 ```text
 openid
@@ -92,9 +111,9 @@ User.Read
 Mail.Read
 Files.Read.All
 Calendars.Read
-Sites.Read.All
-Team.ReadBasic.All
 ```
+
+Do not add `Sites.Read.All` or `Team.ReadBasic.All` while debugging personal Microsoft accounts.
 
 ## New endpoints
 
@@ -115,7 +134,7 @@ GET  /api/debug/config
 After deploy:
 
 ```text
-https://YOUR-APP.onrender.com/api/debug/config
+https://psychapp.bfab.io/api/debug/config
 ```
 
 Expected:
@@ -123,6 +142,7 @@ Expected:
 - `openai.key_present: true`
 - `oauth.config.google.client_id_present: true`
 - `oauth.config.microsoft.client_id_present: true`
+- `oauth.config.google.redirect_uri` equals `https://psychapp.bfab.io/api/oauth/callback/google`
+- `oauth.config.microsoft.redirect_uri` equals `https://psychapp.bfab.io/api/oauth/callback/microsoft`
 
 Then open the app and use the Connect Google / Connect Microsoft buttons.
-
