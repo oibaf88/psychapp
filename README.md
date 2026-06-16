@@ -2,6 +2,19 @@
 
 Aplicación React/Vite convertida desde el JSX original a una PWA usable en Android 16 con backend Node conectado a OpenAI.
 
+## URL de producción
+
+```text
+https://psychapp.bfab.io
+```
+
+Callbacks OAuth canónicas:
+
+```text
+Google:    https://psychapp.bfab.io/api/oauth/callback/google
+Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
+```
+
 ## Qué incluye
 
 - Frontend React/Vite compilable.
@@ -15,9 +28,9 @@ Aplicación React/Vite convertida desde el JSX original a una PWA usable en Andr
 
 ## Documentación importante
 
-- Google OAuth: ver `README_OAUTH_SETUP.md` si está presente.
+- Google OAuth: ver `README_OAUTH_SETUP.md`.
 - Microsoft OAuth / Outlook / Hotmail / Live / OneDrive: ver [`README_MICROSOFT_OAUTH.md`](./README_MICROSOFT_OAUTH.md).
-- Variables de entorno: ver [`.env.example`](./.env.example).
+- Variables de entorno: ver [`README_ENVIRONMENT_VARIABLES.md`](./README_ENVIRONMENT_VARIABLES.md) y [`.env.example`](./.env.example).
 
 ## Ejecución local en ordenador
 
@@ -32,7 +45,7 @@ npm start
 Abre:
 
 ```text
-http://localhost:4173
+http://localhost:10000
 ```
 
 ## Uso en Android 16
@@ -58,11 +71,12 @@ node server.mjs
 ```text
 NODE_VERSION=22.22.0
 PORT=10000
-PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=una_cadena_larga_aleatoria
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
 MCP_REQUIRE_APPROVAL=never
+ALLOW_CUSTOM_OAUTH_SCOPES=false
 ```
 
 6. OpenAI como Render Secret File:
@@ -73,7 +87,7 @@ Contents: sk-proj-...
 Mounted path: /etc/secrets/OPENAI_API_SECRET
 ```
 
-7. En Android 16: abre la URL HTTPS en Chrome → menú ⋮ → **Añadir a pantalla de inicio** / **Instalar app**.
+7. En Android 16: abre `https://psychapp.bfab.io` en Chrome → menú ⋮ → **Añadir a pantalla de inicio** / **Instalar app**.
 
 ## Variables OAuth principales
 
@@ -82,15 +96,16 @@ Google:
 ```env
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/google
+GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 Microsoft:
 
 ```env
+MICROSOFT_TENANT=consumers
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
-MICROSOFT_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 Para Microsoft personal Outlook/Hotmail/Live, consulta `README_MICROSOFT_OAUTH.md`.
@@ -113,7 +128,7 @@ npm start
 Luego abre en Chrome:
 
 ```text
-http://127.0.0.1:4173
+http://127.0.0.1:10000
 ```
 
 ## Seguridad
