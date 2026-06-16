@@ -2,6 +2,23 @@
 
 This document is the source of truth for Render environment variables used by PsychApp.
 
+## Canonical production URL
+
+PsychApp is currently hosted at:
+
+```text
+https://psychapp.bfab.io
+```
+
+Canonical OAuth redirect URIs:
+
+```text
+Google:    https://psychapp.bfab.io/api/oauth/callback/google
+Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
+```
+
+These URLs must be configured both in Render and in the corresponding Google / Microsoft OAuth app settings.
+
 ## Important rule
 
 Google and Microsoft variables are already namespaced. They do not overwrite each other.
@@ -46,7 +63,7 @@ This prevents accidental invalid scopes caused by putting token URLs, validation
 ```env
 NODE_VERSION=22.22.0
 PORT=10000
-PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=CHANGE_ME_LONG_RANDOM_STRING
 MCP_REQUIRE_APPROVAL=never
 ALLOW_CUSTOM_OAUTH_SCOPES=false
@@ -57,13 +74,13 @@ ALLOW_CUSTOM_OAUTH_SCOPES=false
 Correct:
 
 ```env
-PUBLIC_BASE_URL=https://pyschapp.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 ```
 
 Wrong:
 
 ```env
-PUBLIC_BASE_URL=https://pyschapp.onrender.com/
+PUBLIC_BASE_URL=https://psychapp.bfab.io/
 ```
 
 ## OpenAI
@@ -92,7 +109,7 @@ Preferred names:
 ```env
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/google
+GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 Accepted aliases:
@@ -100,7 +117,7 @@ Accepted aliases:
 ```env
 GOOGLE_OAUTH_CLIENT_ID=...
 GOOGLE_OAUTH_CLIENT_SECRET=...
-GOOGLE_OAUTH_REDIRECT_URI=...
+GOOGLE_OAUTH_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 Do not set `GOOGLE_SCOPES` unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
@@ -119,7 +136,7 @@ https://www.googleapis.com/auth/calendar.readonly
 Google redirect URI to register in Google Cloud Console:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/callback/google
+https://psychapp.bfab.io/api/oauth/callback/google
 ```
 
 ## Microsoft OAuth
@@ -129,7 +146,7 @@ Preferred names:
 ```env
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
-MICROSOFT_REDIRECT_URI=https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 MICROSOFT_TENANT=consumers
 ```
 
@@ -138,10 +155,10 @@ Accepted aliases:
 ```env
 AZURE_CLIENT_ID=...
 AZURE_CLIENT_SECRET=...
-AZURE_REDIRECT_URI=...
+AZURE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 MS_CLIENT_ID=...
 MS_CLIENT_SECRET=...
-MS_REDIRECT_URI=...
+MS_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 Do not mix Microsoft values into Google variables.
@@ -149,7 +166,7 @@ Do not mix Microsoft values into Google variables.
 Microsoft redirect URI to register in Microsoft Entra:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 For personal Outlook/Hotmail/Live accounts, keep:
@@ -207,7 +224,7 @@ OAUTH_COOKIE_SECRET=generated_string_here
 ```env
 NODE_VERSION=22.22.0
 PORT=10000
-PUBLIC_BASE_URL=https://pyschapp.onrender.com
+PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=generated_string_here
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
@@ -215,10 +232,10 @@ MCP_REQUIRE_APPROVAL=never
 ALLOW_CUSTOM_OAUTH_SCOPES=false
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/google
+GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
-MICROSOFT_REDIRECT_URI=https://pyschapp.onrender.com/api/oauth/callback/microsoft
+MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 MICROSOFT_TENANT=consumers
 ```
 
