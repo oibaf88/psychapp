@@ -2,6 +2,19 @@
 
 This file documents OAuth errors where the provider or connector says that `scope` is missing from the credential.
 
+## Canonical production URL
+
+```text
+https://psychapp.bfab.io
+```
+
+Canonical redirect URIs:
+
+```text
+Google:    https://psychapp.bfab.io/api/oauth/callback/google
+Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
+```
+
 ## Error: `scope is missing from the credential`
 
 This usually means the OAuth credential definition was created without a `scope` field, or the field was left empty.
@@ -55,13 +68,7 @@ OIDC metadata URL:
 https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration
 
 PsychApp redirect URI:
-https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-```
-
-Replace `YOUR-APP` with the real Render host, for example:
-
-```text
-https://pyschapp.onrender.com/api/oauth/callback/microsoft
+https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 ## Microsoft Entra API permissions
@@ -100,24 +107,30 @@ For Google OAuth credentials, use:
 openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.readonly
 ```
 
+Google redirect URI:
+
+```text
+https://psychapp.bfab.io/api/oauth/callback/google
+```
+
 ## Debugging PsychApp
 
 Open:
 
 ```text
-https://YOUR-APP.onrender.com/api/debug/config
+https://psychapp.bfab.io/api/debug/config
 ```
 
 Check that OAuth config contains the scopes. Then start OAuth from PsychApp:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/start/microsoft
+https://psychapp.bfab.io/api/oauth/start/microsoft
 ```
 
 After login:
 
 ```text
-https://YOUR-APP.onrender.com/api/oauth/status
+https://psychapp.bfab.io/api/oauth/status
 ```
 
 The provider should show `connected: true` and a non-empty `scope` value.
@@ -129,8 +142,8 @@ Do not put PsychApp's callback URL as the authorization URL or token URL.
 Wrong:
 
 ```text
-Authorization URL = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
-Token URL = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+Authorization URL = https://psychapp.bfab.io/api/oauth/callback/microsoft
+Token URL = https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
 Correct:
@@ -138,5 +151,5 @@ Correct:
 ```text
 Authorization URL = https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
 Token URL = https://login.microsoftonline.com/consumers/oauth2/v2.0/token
-Redirect URI = https://YOUR-APP.onrender.com/api/oauth/callback/microsoft
+Redirect URI = https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
