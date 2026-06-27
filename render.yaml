@@ -3,7 +3,7 @@ services:
     name: psyche-deep-openai
     runtime: node
     buildCommand: npm install --no-audit --no-fund && npm run build
-    startCommand: node server.mjs
+    startCommand: node boot-server.mjs
     healthCheckPath: /api/health
     envVars:
       # ── Runtime ──────────────────────────────────────────────────────────────
@@ -19,6 +19,8 @@ services:
         value: "false"
       # Prefer Render Secret File OPENAI_API_SECRET mounted at /etc/secrets/OPENAI_API_SECRET.
       # Keep OPENAI_API_KEY unset unless you deliberately prefer a normal env var.
+      # If OpenAI returns openai_quota_exceeded, fix Usage/Limits/Billing for this exact project/key.
+      # For UI smoke tests without API spend, temporarily set MOCK_AI=true.
 
       # ── App base URL (required for OAuth redirect URIs) ──────────────────────
       - key: PUBLIC_BASE_URL
