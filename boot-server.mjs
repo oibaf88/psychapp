@@ -4,8 +4,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourcePath = path.join(__dirname, 'server.mjs');
-const runtimeDir = path.join(__dirname, '.runtime');
-const patchedPath = path.join(runtimeDir, 'server.patched.mjs');
+// Keep the generated module in the repository root. server.mjs derives ROOT/DIST
+// from import.meta.url, so putting the copy in a subdirectory would break static serving.
+const patchedPath = path.join(__dirname, '.server.patched.mjs');
 
 function patchServerSource(source) {
   let code = source;
@@ -122,6 +123,5 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
 
 const source = fs.readFileSync(sourcePath, 'utf8');
 const patched = patchServerSource(source);
-fs.mkdirSync(runtimeDir, { recursive: true });
 fs.writeFileSync(patchedPath, patched, 'utf8');
 await import(pathToFileURL(patchedPath).href);
