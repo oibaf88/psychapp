@@ -1,6 +1,6 @@
 {
   "name": "psyche-deep-android-openai",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,8 +11,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "start": "node server.mjs",
-    "serve": "node server.mjs",
+    "start": "node boot-server.mjs",
+    "serve": "node boot-server.mjs",
     "health": "node -e \"fetch('http://127.0.0.1:4173/api/health').then(r=>r.json()).then(console.log)\""
   },
   "dependencies": {
