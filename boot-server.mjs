@@ -118,6 +118,16 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
     code = code.replace(oldLine, newLine);
   }
 
+  const optionalWebSearchLine = "if (tools.length) payload.tools = tools;";
+  const requiredWebSearchBlock = `if (tools.length) {
+    payload.tools = tools;
+    if (tools.some(tool => tool?.type === 'web_search') && process.env.WEB_SEARCH_REQUIRED !== 'false') payload.tool_choice = 'required';
+  }`;
+  if (!code.includes(requiredWebSearchBlock)) {
+    if (!code.includes(optionalWebSearchLine)) throw new Error('Cannot find web search tools assignment in server.mjs');
+    code = code.replace(optionalWebSearchLine, requiredWebSearchBlock);
+  }
+
   return code;
 }
 
