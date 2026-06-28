@@ -12,6 +12,7 @@ import {
   FolderOpen,
   Globe2,
   Image as ImageIcon,
+  ClipboardList,
   Link2,
   Loader2,
   Mail,
@@ -33,6 +34,8 @@ const PATH_BASE = BUILD_BASE && BUILD_BASE !== '/' && (
 const API_BASE = `${PATH_BASE}/api`;
 const HOME_PATH = `${PATH_BASE || ''}/`;
 const MAX_INLINE_IMAGE_BYTES = 7 * 1024 * 1024;
+const MAX_INLINE_DOCUMENT_BYTES = 12 * 1024 * 1024;
+const ACCEPTED_EVIDENCE = '.jpeg,.jpg,.png,.webp,.gif,.pdf,.txt,.md,.odt,.ods,.csv,.xls,.xlsx,.doc,.docx,.rtf,.json,.mbox,.html,.xml,.js';
 
 const CONNECTORS = [
   { id: 'gmail', label: 'Gmail', provider: 'google', icon: Mail },
@@ -51,7 +54,14 @@ const EXPORT_SOURCES = [
   'Thunderbird .mbox',
   'Dropbox .csv .txt',
   'Proton Drive .txt .md',
-  'Fotos .jpg .png .webp'
+  'Fotos .jpg .png .webp',
+  'PDF / ODT / XLS'
+];
+
+const ANALYSIS_MODES = [
+  { id: 'case_formulation', label: 'Formulación de caso' },
+  { id: 'personality', label: 'Personalidad' },
+  { id: 'clinical_report', label: 'Informe clínico' }
 ];
 
 function App() {
@@ -59,6 +69,9 @@ function App() {
   const [oauth, setOauth] = useState(null);
   const [selectedConnectors, setSelectedConnectors] = useState([]);
   const [files, setFiles] = useState([]);
+  const [centralText, setCentralText] = useState('');
+  const [centralDocument, setCentralDocument] = useState(null);
+  const [analysisMode, setAnalysisMode] = useState('case_formulation');
   const [profiles, setProfiles] = useState([
     { id: crypto.randomUUID(), url: 'https://x.com/oibafsaijem', enabled: true },
     { id: crypto.randomUUID(), url: 'https://instagram.com/soyoibaf', enabled: true }
@@ -119,10 +132,27 @@ function App() {
   }
 
   async function readFiles(event) {
-    const selected = [...event.target.files].slice(0, 12);
+    const selected = [...event.target.files].slice(0, 24);
+    const next = await readEvidenceFiles(selected, false);
+    setFiles(current => [...current, ...next]);
+    event.target.value = '';
+  }
+
+  async function readCentralDocument(event) {
+    const selected = [...event.target.files].slice(0, 1);
+    const [doc] = await readEvidenceFiles(selected, true);
+    if (doc) {
+      setCentralDocument(doc);
+      if (doc.text && !centralText.trim()) setCentralText(doc.text.slice(0, 40000));
+    }
+    event.target.value = '';
+  }
+
+  async function readEvidenceFiles(selected, central) {
     const next = [];
     for (const file of selected) {
-      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+      const isImage = isImageEvidence(file);
+      const isText = isTextEvidence(file);
       if (isImage) {
         if (file.size > MAX_INLINE_IMAGE_BYTES) {
           setError(`La imagen ${file.name} pesa demasiado para enviarla inline.`);
@@ -136,20 +166,32 @@ function App() {
           size: file.size,
           data_url: await readAsDataUrl(file)
         });
-      } else {
+      } else if (isText) {
         const text = await file.text();
         next.push({
           id: crypto.randomUUID(),
-          kind: 'text',
+          kind: central ? 'central_text_file' : 'text',
           name: file.name,
           type: file.type || 'text/plain',
           size: file.size,
-          text: text.slice(0, 60000)
+          text: text.slice(0, central ? 120000 : 60000)
+        });
+      } else {
+        if (file.size > MAX_INLINE_DOCUMENT_BYTES) {
+          setError(`El archivo ${file.name} pesa demasiado para enviarlo inline.`);
+          continue;
+        }
+        next.push({
+          id: crypto.randomUUID(),
+          kind: central ? 'central_document' : 'document',
+          name: file.name,
+          type: file.type || mimeFromName(file.name),
+          size: file.size,
+          data_url: await readAsDataUrl(file)
         });
       }
     }
-    setFiles(current => [...current, ...next]);
-    event.target.value = '';
+    return next;
   }
 
   function readAsDataUrl(file) {
@@ -159,6 +201,27 @@ function App() {
       reader.onerror = () => reject(reader.error || new Error('No se pudo leer la imagen.'));
       reader.readAsDataURL(file);
     });
+  }
+
+  function isImageEvidence(file) {
+    return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+  }
+
+  function isTextEvidence(file) {
+    return /^(text\/|application\/json|application\/xml|text\/csv)/i.test(file.type)
+      || /\.(txt|md|csv|json|mbox|html?|xml|js|rtf)$/i.test(file.name);
+  }
+
+  function mimeFromName(name) {
+    const lower = String(name || '').toLowerCase();
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.odt')) return 'application/vnd.oasis.opendocument.text';
+    if (lower.endsWith('.ods')) return 'application/vnd.oasis.opendocument.spreadsheet';
+    if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
+    if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (lower.endsWith('.doc')) return 'application/msword';
+    if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    return 'application/octet-stream';
   }
 
   function updateProfile(id, patch) {
@@ -207,6 +270,9 @@ function App() {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          analysis_mode: analysisMode,
+          central_text: centralText,
+          central_document: centralDocument,
           notes,
           profile_urls: activeProfileUrls,
           files,
@@ -282,6 +348,9 @@ function App() {
               onConnect={() => connectProvider('microsoft')}
               onDisconnect={() => disconnectProvider('microsoft')}
             />
+            {health?.oauth?.config?.microsoft?.client_id_present && !health?.oauth?.config?.microsoft?.client_secret_present && (
+              <p className="inline-warning">Microsoft está configurado sin client secret. Si Azure usa una app Web, añade MICROSOFT_CLIENT_SECRET en Render.</p>
+            )}
           </section>
 
           <section className="panel-block">
@@ -339,19 +408,59 @@ function App() {
 
           {error && <div className="alert">{error}</div>}
 
+          <section className="work-section central-section">
+            <div className="section-title split">
+              <span>
+                <ClipboardList size={18} />
+                <h3>Documento central del análisis</h3>
+              </span>
+              <div className="mode-tabs" role="tablist" aria-label="Tipo de análisis">
+                {ANALYSIS_MODES.map(mode => (
+                  <button
+                    key={mode.id}
+                    className={analysisMode === mode.id ? 'mode-tab active' : 'mode-tab'}
+                    onClick={() => setAnalysisMode(mode.id)}
+                    type="button"
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <textarea
+              className="central-textarea"
+              value={centralText}
+              onChange={event => setCentralText(event.target.value)}
+              placeholder="Pega aquí el relato principal, motivo de consulta, autobiografía, informe previo, formulación inicial o texto base. Esta será la pieza central del análisis."
+            />
+            <div className="central-actions">
+              <label className="compact-upload">
+                <Upload size={17} />
+                <input type="file" onChange={readCentralDocument} accept={ACCEPTED_EVIDENCE} />
+                <span>{centralDocument ? centralDocument.name : 'Subir documento central'}</span>
+              </label>
+              {centralDocument && (
+                <button className="secondary-button" type="button" onClick={() => setCentralDocument(null)}>
+                  <Trash2 size={16} />
+                  Quitar
+                </button>
+              )}
+            </div>
+          </section>
+
           <div className="input-grid">
             <section className="work-section">
               <div className="section-title">
                 <FileText size={18} />
-                <h3>Notas y contexto</h3>
+                <h3>Notas complementarias</h3>
               </div>
               <textarea
                 value={notes}
                 onChange={event => setNotes(event.target.value)}
-                placeholder="Estado actual, objetivos, preguntas o contexto clínico no sensible..."
+                placeholder="Contexto adicional, dudas, hipótesis propias, objetivos o matices clínicos no sensibles..."
               />
               <div className="method-strip" aria-label="Capas de análisis">
-                {['OCEAN', 'LIWC', 'Apego', 'Young', 'Sesgos', 'Series', 'Predicción'].map(label => (
+                {['OCEAN', 'LIWC', 'Apego', 'Young', 'Sesgos', 'Riesgo', 'Cronología'].map(label => (
                   <span key={label}>{label}</span>
                 ))}
               </div>
@@ -360,12 +469,12 @@ function App() {
             <section className="work-section">
               <div className="section-title">
                 <Upload size={18} />
-                <h3>Archivos exportados</h3>
+                <h3>Evidencias y adjuntos</h3>
               </div>
               <label className="upload-zone">
                 <Archive size={22} />
-                <input type="file" multiple onChange={readFiles} accept=".txt,.md,.json,.csv,.mbox,.js,.html,.xml,image/png,image/jpeg,image/webp,image/gif" />
-                <span>{files.length ? `${files.length} archivo(s) cargado(s)` : 'Seleccionar exports'}</span>
+                <input type="file" multiple onChange={readFiles} accept={ACCEPTED_EVIDENCE} />
+                <span>{files.length ? `${files.length} archivo(s) cargado(s)` : 'Seleccionar evidencias'}</span>
               </label>
               <div className="export-chips">
                 {EXPORT_SOURCES.map(source => <span key={source}>{source}</span>)}

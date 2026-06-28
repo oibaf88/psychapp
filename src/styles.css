@@ -402,6 +402,7 @@ textarea:focus {
 }
 
 .upload-zone {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -610,6 +611,241 @@ textarea:focus {
   .primary-button,
   .secondary-button,
   .ghost-button {
+    width: 100%;
+  }
+}
+
+/* Email Client visual alignment */
+:root {
+  --bg: #090d17;
+  --panel: #111827;
+  --panel-2: #172033;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #38bdf8;
+  --accent-2: #a78bfa;
+  --border: rgba(255, 255, 255, 0.12);
+  --danger: #fb7185;
+  --ok: #34d399;
+  --warning: #fbbf24;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  background: var(--bg);
+}
+
+body {
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.22), transparent 34rem),
+    radial-gradient(circle at top right, rgba(167, 139, 250, 0.20), transparent 30rem),
+    var(--bg);
+}
+
+.topbar {
+  background: rgba(9, 13, 23, 0.78);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand-mark {
+  color: #03111d;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 14px 40px rgba(56, 189, 248, 0.25);
+}
+
+.brand small,
+.connector small,
+.empty-state,
+.empty-mini,
+.scrape-list article > span {
+  color: var(--muted);
+}
+
+.panel-block,
+.work-section,
+.result-panel,
+.scrape-panel {
+  color: var(--text);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.identity-block {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(167, 139, 250, 0.12));
+  border-color: rgba(56, 189, 248, 0.28);
+}
+
+.identity-block p {
+  color: var(--muted);
+}
+
+h1,
+h2,
+h3 {
+  color: var(--text);
+  letter-spacing: 0;
+}
+
+.eyebrow,
+.section-title svg {
+  color: var(--accent);
+}
+
+.analysis-header {
+  border-bottom: 1px solid var(--border);
+}
+
+input,
+textarea {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+}
+
+input:focus,
+textarea:focus {
+  border-color: rgba(56, 189, 248, 0.68);
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.12);
+}
+
+.primary-button,
+.mode-tab.active {
+  color: #03111d;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: none;
+  font-weight: 900;
+}
+
+.provider-row button,
+.secondary-button,
+.ghost-button,
+.icon-button,
+.mode-tab,
+.compact-upload,
+.file-row {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+}
+
+.provider-row,
+.connector,
+.upload-zone,
+.scrape-list article,
+.file-row,
+.profile-row {
+  border-color: var(--border);
+}
+
+.connector,
+.upload-zone,
+.scrape-list article {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.connector.selected {
+  border-color: rgba(56, 189, 248, 0.38);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.status-pill.ok {
+  color: var(--ok);
+  background: rgba(52, 211, 153, 0.15);
+  border-color: rgba(52, 211, 153, 0.28);
+}
+
+.status-pill.warn {
+  color: var(--warning);
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(251, 191, 36, 0.28);
+}
+
+.dot.connected {
+  background: var(--ok);
+}
+
+.dot {
+  background: var(--danger);
+}
+
+.method-strip span,
+.export-chips span,
+.topic-list span {
+  color: var(--accent);
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+}
+
+.alert {
+  color: var(--danger);
+  background: rgba(251, 113, 133, 0.14);
+  border-color: rgba(251, 113, 133, 0.28);
+}
+
+.inline-warning {
+  margin-top: 8px;
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.analysis-text,
+.scrape-list p,
+.evidence-list {
+  color: var(--text);
+}
+
+.media-evidence a {
+  color: var(--accent);
+}
+
+.central-section {
+  display: grid;
+  gap: 12px;
+}
+
+.central-textarea {
+  min-height: 300px;
+}
+
+.mode-tabs,
+.central-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mode-tab,
+.compact-upload {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 11px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.compact-upload input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+
+@media (max-width: 680px) {
+  .mode-tabs,
+  .central-actions {
+    width: 100%;
+  }
+
+  .mode-tab,
+  .compact-upload {
     width: 100%;
   }
 }

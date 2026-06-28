@@ -16,13 +16,14 @@ const PORT = positiveInt(process.env.PORT, 10000);
 const APP_BASE_PATH = normalizeBasePath(process.env.APP_BASE_PATH || '/psychapp');
 const OPENAI_URL = process.env.OPENAI_URL || 'https://api.openai.com/v1/responses';
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
-const MAX_BODY_BYTES = positiveInt(process.env.MAX_BODY_BYTES, 35 * 1024 * 1024);
+const MAX_BODY_BYTES = positiveInt(process.env.MAX_BODY_BYTES, 60 * 1024 * 1024);
 const SCRAPE_TIMEOUT_MS = positiveInt(process.env.SCRAPE_TIMEOUT_MS, 12000);
 const SCRAPE_MAX_BYTES = positiveInt(process.env.SCRAPE_MAX_BYTES, 1600 * 1024);
 const SCRAPE_MAX_LINKS = positiveInt(process.env.SCRAPE_MAX_LINKS, 80);
 const SCRAPE_MAX_MEDIA = positiveInt(process.env.SCRAPE_MAX_MEDIA, 60);
 const MAX_UPLOADED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_UPLOADED_IMAGES_FOR_VISION, 8);
 const MAX_SCRAPED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_SCRAPED_IMAGES_FOR_VISION, 8);
+const MAX_UPLOADED_DOCUMENTS_FOR_MODEL = positiveInt(process.env.MAX_UPLOADED_DOCUMENTS_FOR_MODEL, 8);
 const OAUTH_COOKIE = 'psychapp_oauth';
 const STATE_COOKIE = 'psychapp_oauth_state';
 const OAUTH_COOKIE_TTL_SECONDS = positiveInt(process.env.OAUTH_COOKIE_TTL_SECONDS, 60 * 60 * 24 * 7);
@@ -443,17 +444,32 @@ async function handleOAuthCallback(req, res, providerName) {
   if (!provider) return sendJson(res, 404, { error: { message: `Proveedor OAuth no soportado: ${providerName}` } });
 
   const reqUrl = new URL(req.url, absoluteBaseUrl(req));
-  const error = reqUrl.searchParams.get('error');
+  const params = await callbackParams(req, reqUrl);
+  const error = params.get('error');
   if (error) {
     return oauthReply(req, res, 400, {
       ok: false,
       provider: providerName,
-      error: { code: error, message: reqUrl.searchParams.get('error_description') || error }
-    }, 'OAuth cancelado', reqUrl.searchParams.get('error_description') || error, APP_BASE_PATH || '/');
+      error: { code: error, message: params.get('error_description') || error }
+    }, 'OAuth cancelado', params.get('error_description') || error, APP_BASE_PATH || '/');
   }
 
-  const code = reqUrl.searchParams.get('code');
-  const state = reqUrl.searchParams.get('state');
+  const code = params.get('code');
+  const state = params.get('state');
+  if (req.method === 'POST' && !code && !state) {
+    return sendJson(res, 200, {
+      ok: true,
+      provider: providerName,
+      status: 'oauth_callback_reachable',
+      message: 'Callback OAuth alcanzable. El flujo real de OAuth debe empezar en /api/oauth/start/{provider} y volver aqui con code/state.',
+      redirect_uri: redirectUriFor(req, providerName),
+      method_received: req.method,
+      client_id_present: Boolean(clientId),
+      client_secret_present: Boolean(clientSecret),
+      expected_flow: 'authorization_code_pkce'
+    });
+  }
+
   const statePayload = verifyStatePayload(parseCookies(req)[STATE_COOKIE]);
   if (!code || !state || !statePayload || statePayload.state !== state || statePayload.provider !== providerName) {
     return oauthReply(req, res, 400, {
@@ -470,19 +486,19 @@ async function handleOAuthCallback(req, res, providerName) {
     }, 'OAuth caducado', 'Reinicia la conexión desde la app.', APP_BASE_PATH || '/');
   }
 
-  const params = new URLSearchParams();
-  params.set('client_id', clientId);
-  if (clientSecret) params.set('client_secret', clientSecret);
-  params.set('code', code);
-  params.set('redirect_uri', redirectUriFor(req, providerName));
-  params.set('grant_type', 'authorization_code');
-  params.set('code_verifier', statePayload.verifier);
-  if (provider.sendScopeInTokenRequest) params.set('scope', provider.scopes.join(' '));
+  const tokenParams = new URLSearchParams();
+  tokenParams.set('client_id', clientId);
+  if (clientSecret) tokenParams.set('client_secret', clientSecret);
+  tokenParams.set('code', code);
+  tokenParams.set('redirect_uri', redirectUriFor(req, providerName));
+  tokenParams.set('grant_type', 'authorization_code');
+  tokenParams.set('code_verifier', statePayload.verifier);
+  if (provider.sendScopeInTokenRequest) tokenParams.set('scope', provider.scopes.join(' '));
 
   const tokenResponse = await fetch(provider.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: params.toString()
+    body: tokenParams.toString()
   });
   const tokenText = await tokenResponse.text();
   let tokenJson = null;
@@ -523,9 +539,38 @@ async function handleOAuthCallback(req, res, providerName) {
   });
 }
 
+async function callbackParams(req, reqUrl) {
+  const params = new URLSearchParams(reqUrl.searchParams);
+  if (req.method !== 'POST') return params;
+
+  const raw = await readBody(req);
+  if (!raw.trim()) return params;
+
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (contentType.includes('application/json')) {
+    try {
+      const json = JSON.parse(raw);
+      for (const [key, value] of Object.entries(json || {})) {
+        if (value != null && !params.has(key)) params.set(key, String(value));
+      }
+    } catch {
+      params.set('error', 'invalid_json_callback_body');
+      params.set('error_description', 'El callback POST recibio JSON invalido.');
+    }
+    return params;
+  }
+
+  const posted = new URLSearchParams(raw);
+  for (const [key, value] of posted.entries()) {
+    if (!params.has(key)) params.set(key, value);
+  }
+  return params;
+}
+
 function oauthReply(req, res, status, payload, title, message, returnTo) {
   const accept = String(req.headers.accept || '').toLowerCase();
-  if (accept.includes('application/json')) return sendJson(res, status, payload);
+  const wantsJson = accept.includes('application/json') || new URL(req.url, absoluteBaseUrl(req)).searchParams.get('json') === '1';
+  if (wantsJson) return sendJson(res, status, payload);
   return sendHtml(res, status, resultHtml(title, message, returnTo));
 }
 
@@ -1129,9 +1174,19 @@ function isImageFile(file = {}) {
   return type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(name);
 }
 
+function isDocumentFile(file = {}) {
+  if (isImageFile(file)) return false;
+  return Boolean(file?.data_url || file?.file_data);
+}
+
 function isSupportedImageUrl(value) {
   const text = String(value || '').trim();
   return /^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(text) || /^https:\/\//i.test(text);
+}
+
+function isSupportedFileData(value) {
+  const text = String(value || '').trim();
+  return /^data:[^;]+;base64,/i.test(text) || /^https:\/\//i.test(text);
 }
 
 function compactScrapedProfiles(scraped = []) {
@@ -1180,14 +1235,20 @@ function collectScrapedImages(scraped = []) {
 function buildAnalysisPrompt(req, body, scraped, tools = []) {
   const files = Array.isArray(body.files) ? body.files : [];
   const notes = String(body.notes || '').trim();
+  const centralText = String(body.central_text || body.case_text || '').trim();
+  const centralDocument = body.central_document && typeof body.central_document === 'object' ? body.central_document : null;
+  const analysisMode = String(body.analysis_mode || 'case_formulation');
   const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
-  const textFiles = files.filter(file => !isImageFile(file));
-  const imageFiles = files.filter(isImageFile).slice(0, MAX_UPLOADED_IMAGES_FOR_VISION);
+  const allFiles = centralDocument ? [centralDocument, ...files] : files;
+  const textFiles = allFiles.filter(file => !isImageFile(file) && !isDocumentFile(file));
+  const imageFiles = allFiles.filter(isImageFile).slice(0, MAX_UPLOADED_IMAGES_FOR_VISION);
+  const documentFiles = allFiles.filter(isDocumentFile).slice(0, MAX_UPLOADED_DOCUMENTS_FOR_MODEL);
   const fileSummaries = textFiles.slice(0, 12).map(file => ({
     name: String(file.name || 'archivo'),
     type: String(file.type || ''),
     size: Number(file.size || 0),
-    text: String(file.text || '').slice(0, 12000)
+    role: file === centralDocument || String(file.kind || '').startsWith('central') ? 'central' : 'evidence',
+    text: String(file.text || '').slice(0, file === centralDocument ? 60000 : 16000)
   }));
   const imageSummaries = imageFiles.map(file => ({
     name: String(file.name || 'imagen'),
@@ -1201,9 +1262,25 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
       type: 'input_text',
       text: JSON.stringify({
         task: 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados, imagenes subidas y perfiles publicos scrapeados.',
+        analysis_mode: analysisMode,
+        central_text: centralText.slice(0, 90000),
+        central_document: centralDocument ? {
+          name: String(centralDocument.name || ''),
+          type: String(centralDocument.type || ''),
+          size: Number(centralDocument.size || 0),
+          kind: String(centralDocument.kind || ''),
+          text_preview: String(centralDocument.text || '').slice(0, 30000),
+          attached_to_model: Boolean(centralDocument.data_url || centralDocument.file_data)
+        } : null,
         notes,
         selected_connectors: selected,
         files: fileSummaries,
+        attached_documents: documentFiles.map(file => ({
+          name: String(file.name || 'documento'),
+          type: String(file.type || ''),
+          size: Number(file.size || 0),
+          role: file === centralDocument || String(file.kind || '').startsWith('central') ? 'central' : 'evidence'
+        })),
         uploaded_images: imageSummaries,
         scraped_public_images_sent_to_vision: scrapedImages.map(image => ({
           url: image.src,
@@ -1220,6 +1297,16 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
     const imageUrl = String(file.data_url || file.url || '').trim();
     if (isSupportedImageUrl(imageUrl)) content.push({ type: 'input_image', image_url: imageUrl });
   }
+  for (const file of documentFiles) {
+    const fileData = String(file.file_data || file.data_url || file.url || '').trim();
+    if (isSupportedFileData(fileData)) {
+      content.push({
+        type: 'input_file',
+        filename: String(file.name || 'documento'),
+        file_data: fileData
+      });
+    }
+  }
   for (const image of scrapedImages) {
     if (isSupportedImageUrl(image.src)) content.push({ type: 'input_image', image_url: image.src });
   }
@@ -1228,11 +1315,15 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
     model: body.model || DEFAULT_MODEL,
     instructions: [
       'Eres PsychApp, una herramienta de apoyo para reflexión psicológica estructurada.',
-      'No diagnostiques ni sustituyas evaluación clínica. Señala incertidumbre, límites y riesgos.',
-      'Usa datos conectados, archivos, imagenes subidas y scraping publico como evidencia; separa observacion, hipotesis y acciones prudentes.',
-      'Describe las fotos subidas y las imagenes publicas accesibles sin identificar personas ni inferir atributos sensibles. Centrate en escena, objetos, actividad, texto visible, tono visual y limites de confianza.',
+      'No diagnostiques ni sustituyas evaluacion clinica. Senala incertidumbre, limites, contraevidencia y riesgos. Si hay pocos datos, aun asi formula hipotesis utiles, pero graduadas por confianza.',
+      'El documento central o texto pegado tiene maxima prioridad. Usa notas, adjuntos, conectores y scraping como evidencia auxiliar o contraste.',
+      'Trabaja de forma rigurosa: distingue observaciones, inferencias, hipotesis clinicas, factores de personalidad, patrones temporales, factores de riesgo/proteccion y recomendaciones prudentes.',
+      'Cuando el modo sea case_formulation, entrega formulacion de caso: problema nuclear, precipitantes, predisponentes, perpetuantes, protectores, ciclo funcional, necesidades, hipotesis alternativas y plan de exploracion.',
+      'Cuando el modo sea personality, entrega analisis de personalidad: OCEAN, apego, esquemas tempranos, defensas/coping, regulacion emocional, sesgos cognitivos y consistencia de evidencia.',
+      'Cuando el modo sea clinical_report, entrega informe clinico no diagnostico: motivo, fuentes, hallazgos, formulacion, riesgos, limitaciones y proximos pasos.',
+      'Describe imagenes subidas y publicas sin identificar personas ni inferir atributos sensibles. Centrate en escena, objetos, actividad, texto visible, tono visual y limites de confianza.',
       'El scraping debe resumir temas tratados, relatos recurrentes, senales temporales, hashtags, enlaces relevantes, contenido visual y evidencias por URL; no te limites a contar posts o metadatos.',
-      'Devuelve el resultado en espanol con secciones: lectura global, temas detectados, evidencias por fuente, analisis visual, patrones, senales temporales, hipotesis prudentes, preguntas utiles, proximos pasos y limites.'
+      'Devuelve en espanol con secciones: resumen ejecutivo, fuentes usadas, evidencia central, temas y patrones, analisis de personalidad/formulacion, hipotesis con confianza, contraevidencias, preguntas clinicas utiles, proximos pasos y limites.'
     ].join('\n'),
     input: [
       {
@@ -1241,7 +1332,7 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
       }
     ],
     tools,
-    max_output_tokens: positiveInt(body.max_output_tokens, 2500),
+    max_output_tokens: positiveInt(body.max_output_tokens, 4500),
     store: process.env.OPENAI_STORE === 'true'
   };
 }
@@ -1334,6 +1425,9 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
     app_path: APP_BASE_PATH || '/',
     request_meta: {
       notes_present: Boolean(body.notes),
+      central_text_present: Boolean(body.central_text),
+      central_document_present: Boolean(body.central_document),
+      analysis_mode: body.analysis_mode || 'case_formulation',
       connector_ids: Array.isArray(body.connector_ids) ? body.connector_ids : [],
       file_count: Array.isArray(body.files) ? body.files.length : 0,
       image_file_count: Array.isArray(body.files) ? body.files.filter(isImageFile).length : 0,
@@ -1404,6 +1498,7 @@ function publicDiagnostics(req = null) {
       max_media: SCRAPE_MAX_MEDIA,
       max_uploaded_images_for_vision: MAX_UPLOADED_IMAGES_FOR_VISION,
       max_scraped_images_for_vision: MAX_SCRAPED_IMAGES_FOR_VISION,
+      max_uploaded_documents_for_model: MAX_UPLOADED_DOCUMENTS_FOR_MODEL,
       blocks_private_hosts: true
     },
     supabase: {
@@ -1488,9 +1583,9 @@ const server = http.createServer((req, res) => {
   if (pathname.startsWith('/api/oauth/start/')) return req.method === 'GET'
     ? handleOAuthStart(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
     : methodNotAllowed(res, 'GET');
-  if (pathname.startsWith('/api/oauth/callback/')) return req.method === 'GET'
+  if (pathname.startsWith('/api/oauth/callback/')) return (req.method === 'GET' || req.method === 'POST')
     ? handleOAuthCallback(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
-    : methodNotAllowed(res, 'GET');
+    : methodNotAllowed(res, 'GET,POST');
   if (pathname === '/api/scrape') return req.method === 'POST' ? handleScrape(req, res) : methodNotAllowed(res, 'POST');
   if (pathname === '/api/analyze') return req.method === 'POST' ? handleAnalyze(req, res) : methodNotAllowed(res, 'POST');
   if (pathname === '/api/messages') return req.method === 'POST' ? handleMessages(req, res) : methodNotAllowed(res, 'POST');
