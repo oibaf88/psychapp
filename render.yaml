@@ -3,7 +3,7 @@ services:
     name: psyche-deep-openai
     runtime: node
     buildCommand: npm install --no-audit --no-fund && npm run build
-    startCommand: node boot-server.mjs
+    startCommand: node boot-server-mcp.mjs
     healthCheckPath: /api/health
     envVars:
       # ── Runtime ──────────────────────────────────────────────────────────────
@@ -63,3 +63,22 @@ services:
       # ── OpenAI connector approval mode ───────────────────────────────────────
       - key: MCP_REQUIRE_APPROVAL
         value: never
+
+      # ── PsychApp as remote MCP server for ChatGPT / OpenAI Apps SDK ──────────
+      - key: PSYCHAPP_MCP_PATH
+        value: /mcp
+      - key: PSYCHAPP_MCP_PUBLIC_BASE_URL
+        value: https://psychapp.bfab.io
+      - key: PSYCHAPP_MCP_SCOPES
+        value: psychapp:read psychapp:analyze
+      # Strongly recommended: set this in Render before connecting ChatGPT.
+      - key: PSYCHAPP_MCP_OWNER_PIN
+        sync: false
+      # Optional separate MCP signing secret. If unset, OAUTH_COOKIE_SECRET is reused.
+      - key: PSYCHAPP_MCP_OAUTH_SECRET
+        sync: false
+      # Optional Supabase persistence for audit/snapshots. Use service role server-side only.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
