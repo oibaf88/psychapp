@@ -17,10 +17,38 @@ function publicOpenAIRequestMeta(payload = {}) {
     model: payload.model || DEFAULT_MODEL,
     max_output_tokens: payload.max_output_tokens || null,
     store: payload.store === true,
+    tool_choice: payload.tool_choice || 'auto',
     tools: Array.isArray(payload.tools)
       ? payload.tools.map(tool => ({ type: tool?.type || '', connector_id: tool?.connector_id || '', server_label: tool?.server_label || '' }))
       : []
   };
+}
+
+function hasOpenAIWebSearch(payload = {}) {
+  return Array.isArray(payload.tools) && payload.tools.some(tool => tool?.type === 'web_search');
+}
+
+function normalizeWebSearchText(value = '') {
+  return String(value || '')
+    .replace(/web_fetch/gi, 'web_search')
+    .replace(/fetch each one/gi, 'inspect available public search results')
+    .replace(/Scraping público/gi, 'Búsqueda web pública')
+    .replace(/scraping/gi, 'búsqueda web pública');
+}
+
+function prepareWebSearchPayload(payload = {}) {
+  if (!hasOpenAIWebSearch(payload)) return payload;
+  payload.tool_choice = process.env.WEB_SEARCH_REQUIRED === 'false' ? 'auto' : 'required';
+  payload.instructions = normalizeWebSearchText(payload.instructions || '');
+  payload.instructions += '\n\nImplementation constraint: this app only provides the OpenAI hosted web_search tool. Use public web search results only. Always return strict JSON with this shape: {"items":[],"total_found":0,"data_quality":"none|poor|moderate|good","sources_tried":[],"notes":""}.';
+  if (Array.isArray(payload.input)) {
+    payload.input = payload.input.map(item => ({
+      ...item,
+      content: typeof item.content === 'string' ? normalizeWebSearchText(item.content) : item.content
+    }));
+  }
+  payload.include = Array.from(new Set([...(Array.isArray(payload.include) ? payload.include : []), 'web_search_call.action.sources']));
+  return payload;
 }
 
 function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
@@ -34,15 +62,16 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
     return {
       error: {
         code: 'openai_quota_exceeded',
-        message: 'Cuota o presupuesto de OpenAI agotado. Gmail/Drive están conectando, pero el análisis no puede ejecutarse hasta que aumentes el límite mensual, añadas créditos o uses otra clave/proyecto con presupuesto disponible.',
+        message: 'Presupuesto o cuota insuficiente en OpenAI Platform para esta petición. Render solo aloja la app y Supabase no interviene en este error.',
         upstream_status: status,
         upstream_code: err.code || err.type || null,
         recoverable_by_retry: false,
         next_steps: [
-          'Revisa Usage y Limits/Billing del proyecto OpenAI que corresponde a OPENAI_API_SECRET u OPENAI_API_KEY.',
-          'Aumenta el monthly budget, compra créditos o cambia a otra clave/proyecto con presupuesto disponible.',
-          'Después redeploy/restart en Render y prueba /api/health para confirmar key_present=true y el modelo activo.',
-          'Para probar la interfaz sin gastar créditos, activa temporalmente MOCK_AI=true.'
+          'Abre OpenAI Platform en la organización donde están los créditos.',
+          'Verifica que la API key usada por la app pertenece a ese mismo proyecto OpenAI.',
+          'Comprueba el monthly budget y usage del proyecto OpenAI.',
+          'Crea una API key nueva en ese proyecto y sustituye el secreto usado por la app.',
+          'Reinicia el servicio para que lea la nueva clave.'
         ],
         request: meta,
         upstream_message: rawMessage
@@ -64,11 +93,25 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
     };
   }
 
+  if (status === 400 && hasOpenAIWebSearch(requestPayload)) {
+    return {
+      error: {
+        code: 'openai_web_search_request_error',
+        message: 'OpenAI rechazó la petición de búsqueda web. El backend normaliza la petición a web_search; revisa upstream_message para el motivo exacto.',
+        upstream_status: status,
+        upstream_code: err.code || err.type || null,
+        recoverable_by_retry: false,
+        request: meta,
+        upstream_message: rawMessage
+      }
+    };
+  }
+
   if (status === 401 || status === 403) {
     return {
       error: {
         code: 'openai_auth_or_permission_error',
-        message: 'La clave OpenAI no es válida o no tiene permisos para este modelo/proyecto. Revisa OPENAI_API_SECRET/OPENAI_API_KEY y el proyecto asociado.',
+        message: 'La clave OpenAI no es válida o no tiene permisos para este modelo/proyecto. Revisa la API key y el proyecto asociado dentro de OpenAI Platform.',
         upstream_status: status,
         upstream_code: err.code || err.type || null,
         recoverable_by_retry: false,
@@ -82,7 +125,7 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
     return {
       error: {
         code: 'openai_upstream_error',
-        message: 'OpenAI devolvió un error temporal de servidor. Reintenta más tarde; si persiste, revisa status.openai.com y los logs de Render.',
+        message: 'OpenAI devolvió un error temporal de servidor. Reintenta más tarde; si persiste, revisa status.openai.com.',
         upstream_status: status,
         upstream_code: err.code || err.type || null,
         recoverable_by_retry: true,
@@ -117,7 +160,17 @@ function oauthResponseHeaders(req) {
     code = code.replace('function openAIErrorPayload(', `${helper}\nfunction openAIErrorPayload(`);
   }
 
-  const oldTokenMetaBlock = `function getOAuthTokenWithMeta(req, label, connectorId = '') {\n  const provider = providerForConnector(connectorId);\n  const accessToken = provider ? getProviderToken(req, provider) : '';\n  if (accessToken) return { value: accessToken, source: \`oauth-cookie:\${provider}\` };\n  if (process.env.ALLOW_STATIC_OAUTH_TOKENS === 'true') {\n    const info = findSecret(tokenNamesFor(label, connectorId));\n    if (info.value) return info;\n  }\n  return { value: '', source: '' };\n}\n`;
+  const oldTokenMetaBlock = `function getOAuthTokenWithMeta(req, label, connectorId = '') {
+  const provider = providerForConnector(connectorId);
+  const accessToken = provider ? getProviderToken(req, provider) : '';
+  if (accessToken) return { value: accessToken, source: \`oauth-cookie:\${provider}\` };
+  if (process.env.ALLOW_STATIC_OAUTH_TOKENS === 'true') {
+    const info = findSecret(tokenNamesFor(label, connectorId));
+    if (info.value) return info;
+  }
+  return { value: '', source: '' };
+}
+`;
 
   const refreshedTokenMetaBlock = `${oldTokenMetaBlock}
 async function refreshProviderAccessToken(req, providerName, store) {
@@ -216,7 +269,7 @@ async function getOAuthTokenWithMetaForConnector(req, label, connectorId = '') {
     ["const tokenInfo = getOAuthTokenWithMeta(req, label, connectorId);", "const tokenInfo = await getOAuthTokenWithMetaForConnector(req, label, connectorId);"],
     ["function toResponsesPayload(req, body) {", "async function toResponsesPayload(req, body) {"],
     ["const tools = convertTools(req, body.tools || [], body.mcp_servers || []);", "const tools = await convertTools(req, body.tools || [], body.mcp_servers || []);"],
-    ["const payload = toResponsesPayload(req, body);", "const payload = await toResponsesPayload(req, body);"],
+    ["const payload = toResponsesPayload(req, body);", "const payload = prepareWebSearchPayload(await toResponsesPayload(req, body));"],
     ["return sendJson(res, 200, asAnthropicCompatible(data));", "return sendJson(res, 200, asAnthropicCompatible(data), oauthResponseHeaders(req));"]
   ];
 
