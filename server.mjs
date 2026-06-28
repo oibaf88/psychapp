@@ -474,8 +474,26 @@ function redirectUriFor(req, providerName) {
 }
 
 function apiRouteFor(req, route) {
-  const pathname = new URL(absoluteBaseUrl(req)).pathname.replace(/\/$/, '');
+  const pathname = APP_BASE_PATH || new URL(absoluteBaseUrl(req)).pathname.replace(/\/$/, '');
   return `${pathname}${route}` || route;
+}
+
+function appReturnPath(req) {
+  const fallback = `${APP_BASE_PATH || '/'}`;
+  try {
+    const referer = String(req.headers.referer || '');
+    if (!referer) return fallback;
+    const url = new URL(referer);
+    const path = `${url.pathname}${url.search}`;
+    if (!APP_BASE_PATH || path === APP_BASE_PATH || path.startsWith(`${APP_BASE_PATH}/`)) return path;
+  } catch {
+    // Use the app root when the browser did not send a parseable referrer.
+  }
+  return fallback;
+}
+
+function oauthStartUrl(req, providerName) {
+  return `${apiRouteFor(req, `/api/oauth/start/${providerName}`)}?return_to=${encodeURIComponent(appReturnPath(req))}`;
 }
 
 async function sha256Base64Url(input) {
@@ -1164,7 +1182,7 @@ async function getMcpTools(req, body) {
       throw Object.assign(new Error(`OAuth requerido para ${connector.label}`), {
         status: 401,
         oauth_provider: connector.provider,
-        oauth_url: `${apiRouteFor(req, `/api/oauth/start/${connector.provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+        oauth_url: oauthStartUrl(req, connector.provider),
         oauth_reason: tokenState.reason,
         oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider)
       });
@@ -1176,7 +1194,7 @@ async function getMcpTools(req, body) {
       throw Object.assign(new Error(`Faltan permisos de OAuth para ${connector.label}. Reconecta ${OAUTH_PROVIDERS[connector.provider]?.label || connector.provider}.`), {
         status: 401,
         oauth_provider: connector.provider,
-        oauth_url: `${apiRouteFor(req, `/api/oauth/start/${connector.provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+        oauth_url: oauthStartUrl(req, connector.provider),
         oauth_reason: 'missing_scopes',
         oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider),
         diagnostic: {
@@ -1291,7 +1309,7 @@ function normalizeConnectorOAuthError(error, req, body = {}) {
   return Object.assign(new Error(`OpenAI no pudo usar los datos de ${connector.label}. Reconecta ${providerLabel} y acepta todos los permisos solicitados.`), {
     status: 401,
     oauth_provider: provider,
-    oauth_url: `${apiRouteFor(req, `/api/oauth/start/${provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+    oauth_url: oauthStartUrl(req, provider),
     oauth_reason: 'openai_connector_auth_failed',
     oauth_status: publicTokenMeta(readOAuthStore(req).providers?.[provider], provider),
     diagnostic: {
