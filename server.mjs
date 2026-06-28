@@ -16,13 +16,17 @@ const PORT = positiveInt(process.env.PORT, 10000);
 const APP_BASE_PATH = normalizeBasePath(process.env.APP_BASE_PATH || '/psychapp');
 const OPENAI_URL = process.env.OPENAI_URL || 'https://api.openai.com/v1/responses';
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
-const MAX_BODY_BYTES = positiveInt(process.env.MAX_BODY_BYTES, 20 * 1024 * 1024);
+const MAX_BODY_BYTES = positiveInt(process.env.MAX_BODY_BYTES, 35 * 1024 * 1024);
 const SCRAPE_TIMEOUT_MS = positiveInt(process.env.SCRAPE_TIMEOUT_MS, 12000);
-const SCRAPE_MAX_BYTES = positiveInt(process.env.SCRAPE_MAX_BYTES, 900 * 1024);
+const SCRAPE_MAX_BYTES = positiveInt(process.env.SCRAPE_MAX_BYTES, 1600 * 1024);
+const SCRAPE_MAX_LINKS = positiveInt(process.env.SCRAPE_MAX_LINKS, 80);
+const SCRAPE_MAX_MEDIA = positiveInt(process.env.SCRAPE_MAX_MEDIA, 60);
+const MAX_UPLOADED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_UPLOADED_IMAGES_FOR_VISION, 8);
+const MAX_SCRAPED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_SCRAPED_IMAGES_FOR_VISION, 8);
 const OAUTH_COOKIE = 'psychapp_oauth';
 const STATE_COOKIE = 'psychapp_oauth_state';
 const OAUTH_COOKIE_TTL_SECONDS = positiveInt(process.env.OAUTH_COOKIE_TTL_SECONDS, 60 * 60 * 24 * 7);
-const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'consumers';
+const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'common';
 
 const CONNECTORS = {
   gmail: { provider: 'google', connector_id: 'connector_gmail', label: 'Gmail' },
@@ -48,10 +52,10 @@ const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
   'profile',
   'email',
   'offline_access',
-  'https://graph.microsoft.com/User.Read',
-  'https://graph.microsoft.com/Mail.Read',
-  'https://graph.microsoft.com/Files.Read.All',
-  'https://graph.microsoft.com/Calendars.Read'
+  'User.Read',
+  'Mail.Read',
+  'Files.Read.All',
+  'Calendars.Read'
 ]);
 
 const OAUTH_PROVIDERS = {
@@ -253,8 +257,16 @@ function isSecureRequest(req) {
 function cookieString(name, value, req, opts = {}) {
   const parts = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax'];
   if (isSecureRequest(req)) parts.push('Secure');
+  const cookieDomain = String(process.env.OAUTH_COOKIE_DOMAIN || '').trim();
+  if (cookieDomain && cookieDomainMatches(req, cookieDomain)) parts.push(`Domain=${cookieDomain.replace(/^\./, '.')}`);
   if (opts.maxAge != null) parts.push(`Max-Age=${opts.maxAge}`);
   return parts.join('; ');
+}
+
+function cookieDomainMatches(req, domain) {
+  const host = String(req.headers.host || '').split(':')[0].toLowerCase();
+  const clean = String(domain || '').replace(/^\./, '').toLowerCase();
+  return Boolean(host && clean && (host === clean || host.endsWith(`.${clean}`)));
 }
 
 function cryptoKey() {
@@ -328,19 +340,17 @@ function writeOAuthStore(req, store) {
 
 function publicTokenMeta(token = {}) {
   if (!token?.access_token) return { connected: false };
+  const expiresInSeconds = token.expires_at ? Math.max(0, Math.floor((token.expires_at - Date.now()) / 1000)) : null;
+  const expired = expiresInSeconds != null && expiresInSeconds <= 30;
   return {
     connected: true,
+    usable: !expired || Boolean(token.refresh_token),
+    expired,
+    can_refresh: Boolean(token.refresh_token),
     expires_at: token.expires_at || null,
-    expires_in_seconds: token.expires_at ? Math.max(0, Math.floor((token.expires_at - Date.now()) / 1000)) : null,
+    expires_in_seconds: expiresInSeconds,
     scope: token.scope || ''
   };
-}
-
-function getProviderToken(req, provider) {
-  const token = readOAuthStore(req).providers?.[provider];
-  if (!token?.access_token) return '';
-  if (token.expires_at && Date.now() > token.expires_at - 30000) return '';
-  return token.access_token;
 }
 
 function oauthProviderConfig(providerName) {
@@ -355,7 +365,23 @@ function oauthProviderConfig(providerName) {
 
 function absoluteBaseUrl(req) {
   const configured = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
-  if (configured) return configured;
+  const derived = requestBaseUrl(req);
+  if (!configured) return derived;
+  if (process.env.OAUTH_FORCE_PUBLIC_BASE_URL === 'true') return configured;
+  try {
+    const configuredUrl = new URL(configured);
+    const derivedUrl = new URL(derived);
+    const derivedHost = derivedUrl.host.toLowerCase();
+    if (configuredUrl.host.toLowerCase() !== derivedHost && !derivedHost.endsWith('.onrender.com')) {
+      return derived;
+    }
+  } catch {
+    return derived;
+  }
+  return configured;
+}
+
+function requestBaseUrl(req) {
   const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() || 'http';
   const host = req.headers.host || `127.0.0.1:${PORT}`;
   return `${proto}://${host}${APP_BASE_PATH}`;
@@ -365,6 +391,11 @@ function redirectUriFor(req, providerName) {
   const provider = OAUTH_PROVIDERS[providerName];
   const explicit = provider ? findSecret(provider.redirectUriNames).value : '';
   return explicit || `${absoluteBaseUrl(req)}/api/oauth/callback/${providerName}`;
+}
+
+function apiRouteFor(req, route) {
+  const pathname = new URL(absoluteBaseUrl(req)).pathname.replace(/\/$/, '');
+  return `${pathname}${route}` || route;
 }
 
 async function sha256Base64Url(input) {
@@ -499,7 +530,7 @@ function oauthReply(req, res, status, payload, title, message, returnTo) {
 }
 
 function resultHtml(title, message, returnTo) {
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body style="font-family:system-ui;padding:2rem;line-height:1.5;background:#f7f3ea;color:#15221f"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="${escapeHtml(returnTo)}">Volver a PsychApp</a></p></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body style="font-family:system-ui;padding:2rem;line-height:1.5;background:#eef6ff;color:#10233f"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="${escapeHtml(returnTo)}">Volver a PsychApp</a></p></body></html>`;
 }
 
 function handleOAuthStatus(req, res) {
@@ -528,6 +559,8 @@ function publicOAuthConfig(req) {
     return [id, {
       client_id_present: Boolean(clientId),
       client_secret_present: Boolean(clientSecret),
+      auth_url: provider.authUrl,
+      token_url: provider.tokenUrl,
       redirect_uri: redirectUriFor(req, id),
       scopes: provider.scopes
     }];
@@ -638,18 +671,28 @@ async function scrapeOne(inputUrl) {
 function extractPage(raw, contentType, finalUrl) {
   const text = String(raw || '');
   if (contentType.includes('application/json')) {
+    const jsonText = text.slice(0, 30000);
     return {
       title: finalUrl,
       description: '',
-      text: text.slice(0, 12000),
+      text: jsonText,
       links: [],
       media: [],
+      topics: extractTopics(jsonText),
+      hashtags: extractHashtags(jsonText),
+      mentions: extractMentions(jsonText),
+      stats: textStats(jsonText, [], []),
       json: safeJsonPreview(text)
     };
   }
 
   const title = firstMatch(text, /<title[^>]*>([\s\S]*?)<\/title>/i);
   const description = metaContent(text, 'description') || metaProperty(text, 'og:description') || metaProperty(text, 'twitter:description');
+  const keywords = splitKeywords(metaContent(text, 'keywords') || metaProperty(text, 'article:tag'));
+  const author = metaContent(text, 'author') || metaProperty(text, 'article:author') || metaProperty(text, 'og:site_name');
+  const publishedTime = metaProperty(text, 'article:published_time') || metaContent(text, 'date') || metaContent(text, 'pubdate');
+  const modifiedTime = metaProperty(text, 'article:modified_time') || metaContent(text, 'last-modified');
+  const language = firstMatch(text, /<html[^>]+lang=["']?([^"'\s>]+)/i) || metaProperty(text, 'og:locale');
   const cleanHtml = text
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -660,14 +703,29 @@ function extractPage(raw, contentType, finalUrl) {
   const visible = decodeEntities(body.replace(/<[^>]+>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 18000);
+    .slice(0, 30000);
+  const links = extractLinks(text, finalUrl);
+  const media = extractMedia(text, finalUrl);
+  const headings = extractHeadings(cleanHtml);
+  const hashtags = extractHashtags(visible);
+  const mentions = extractMentions(visible);
+  const topics = mergeTopics(keywords, extractTopics([headings.join(' '), visible].join(' '))).slice(0, 28);
 
   return {
     title: decodeEntities(title || metaProperty(text, 'og:title') || finalUrl).trim(),
     description: decodeEntities(description || '').trim(),
+    author: decodeEntities(author || '').trim(),
+    published_time: decodeEntities(publishedTime || '').trim(),
+    modified_time: decodeEntities(modifiedTime || '').trim(),
+    language: decodeEntities(language || '').trim(),
     text: visible,
-    links: extractLinks(text, finalUrl),
-    media: extractMedia(text, finalUrl),
+    headings,
+    topics,
+    hashtags,
+    mentions,
+    links,
+    media,
+    stats: textStats(visible, links, media),
     json_ld: extractJsonLd(text)
   };
 }
@@ -686,13 +744,27 @@ function firstMatch(text, regex) {
 }
 
 function metaContent(html, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return firstMatch(html, new RegExp(`<meta[^>]+name=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, 'i'));
+  return metaBy(html, 'name', name);
 }
 
 function metaProperty(html, property) {
-  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return firstMatch(html, new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, 'i'));
+  return metaBy(html, 'property', property) || metaBy(html, 'name', property);
+}
+
+function metaBy(html, attrName, attrValue) {
+  const tags = String(html || '').match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of tags) {
+    if (htmlAttr(tag, attrName).toLowerCase() === String(attrValue || '').toLowerCase()) {
+      return htmlAttr(tag, 'content');
+    }
+  }
+  return '';
+}
+
+function htmlAttr(tag, attrName) {
+  const escaped = String(attrName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(tag || '').match(new RegExp(`\\s${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return decodeEntities(match?.[1] || match?.[2] || match?.[3] || '').trim();
 }
 
 function decodeEntities(value) {
@@ -705,15 +777,104 @@ function decodeEntities(value) {
     .replace(/&gt;/g, '>');
 }
 
+function stripTags(value) {
+  return decodeEntities(String(value || '').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitKeywords(value) {
+  return String(value || '')
+    .split(/[,;|]/)
+    .map(item => decodeEntities(item).trim())
+    .filter(Boolean)
+    .slice(0, 24);
+}
+
+function extractHeadings(html) {
+  const headings = [];
+  const regex = /<h([1-4])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
+  for (const match of String(html || '').matchAll(regex)) {
+    const text = stripTags(match[2]);
+    if (text && text.length > 2) headings.push(text.slice(0, 220));
+    if (headings.length >= 36) break;
+  }
+  return headings;
+}
+
+function extractHashtags(text) {
+  return [...new Set([...String(text || '').matchAll(/(^|\s)#([\p{L}\p{N}_-]{2,60})/gu)].map(match => `#${match[2]}`))].slice(0, 48);
+}
+
+function extractMentions(text) {
+  return [...new Set([...String(text || '').matchAll(/(^|\s)@([\p{L}\p{N}_\.-]{2,60})/gu)].map(match => `@${match[2]}`))].slice(0, 36);
+}
+
+const STOP_WORDS = new Set([
+  'para', 'como', 'pero', 'porque', 'desde', 'sobre', 'entre', 'donde', 'cuando', 'todo', 'toda', 'todos', 'todas',
+  'esta', 'este', 'estos', 'estas', 'esto', 'tambien', 'también', 'hacer', 'hace', 'cada', 'otro', 'otra', 'otros',
+  'otras', 'muy', 'mas', 'más', 'menos', 'con', 'sin', 'por', 'una', 'uno', 'unos', 'unas', 'los', 'las', 'del',
+  'que', 'the', 'and', 'for', 'with', 'from', 'this', 'that', 'your', 'you', 'are', 'was', 'were', 'have', 'has',
+  'not', 'all', 'can', 'will', 'our', 'about', 'into', 'their', 'there', 'here', 'more', 'what', 'when', 'where'
+]);
+
+function extractTopics(text) {
+  const counts = new Map();
+  const words = String(text || '').toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_-]{3,}/gu) || [];
+  for (const word of words) {
+    const clean = word.normalize('NFKD').replace(/\p{Diacritic}/gu, '');
+    if (STOP_WORDS.has(word) || STOP_WORDS.has(clean) || /^\d+$/.test(clean)) continue;
+    counts.set(word, (counts.get(word) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 24)
+    .map(([word, count]) => ({ term: word, count }));
+}
+
+function mergeTopics(keywords, terms) {
+  const out = [];
+  const seen = new Set();
+  for (const keyword of keywords || []) {
+    const term = String(keyword || '').trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ term, source: 'meta' });
+  }
+  for (const item of terms || []) {
+    const term = String(item?.term || item || '').trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push(typeof item === 'object' ? item : { term });
+  }
+  return out;
+}
+
+function textStats(text, links, media) {
+  const words = String(text || '').match(/[\p{L}\p{N}]+/gu) || [];
+  return {
+    characters: String(text || '').length,
+    words: words.length,
+    links: Array.isArray(links) ? links.length : 0,
+    media: Array.isArray(media) ? media.length : 0
+  };
+}
+
 function extractLinks(html, baseUrl) {
   const links = [];
-  const regex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const regex = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
   for (const match of html.matchAll(regex)) {
-    if (links.length >= 40) break;
+    if (links.length >= SCRAPE_MAX_LINKS) break;
     try {
-      const href = new URL(decodeEntities(match[1]), baseUrl).href;
-      const text = decodeEntities(match[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-      links.push({ href, text: text.slice(0, 180) });
+      const tag = match[0].split('>')[0];
+      const hrefRaw = htmlAttr(tag, 'href');
+      if (!hrefRaw || hrefRaw.startsWith('#') || /^javascript:/i.test(hrefRaw)) continue;
+      const href = new URL(hrefRaw, baseUrl).href;
+      const text = stripTags(match[1]);
+      const sameHost = new URL(href).host === new URL(baseUrl).host;
+      links.push({ href, text: text.slice(0, 220), kind: sameHost ? 'internal' : 'external' });
     } catch {
       // Ignore invalid hrefs.
     }
@@ -723,16 +884,46 @@ function extractLinks(html, baseUrl) {
 
 function extractMedia(html, baseUrl) {
   const media = [];
-  const regex = /<(?:img|video|source)\s+[^>]*(?:src|poster)=["']([^"']+)["'][^>]*>/gi;
+  const regex = /<(img|video|source)\b[^>]*>/gi;
   for (const match of html.matchAll(regex)) {
-    if (media.length >= 20) break;
+    if (media.length >= SCRAPE_MAX_MEDIA) break;
     try {
-      media.push(new URL(decodeEntities(match[1]), baseUrl).href);
+      const tagName = match[1].toLowerCase();
+      const tag = match[0];
+      const srcRaw = htmlAttr(tag, 'src') || htmlAttr(tag, 'data-src') || htmlAttr(tag, 'poster') || firstSrcsetUrl(htmlAttr(tag, 'srcset'));
+      if (!srcRaw || srcRaw.startsWith('data:')) continue;
+      const src = new URL(srcRaw, baseUrl).href;
+      const context = nearbyText(html, match.index || 0);
+      media.push({
+        type: tagName === 'img' ? 'image' : 'media',
+        src,
+        alt: htmlAttr(tag, 'alt'),
+        title: htmlAttr(tag, 'title') || htmlAttr(tag, 'aria-label'),
+        width: htmlAttr(tag, 'width'),
+        height: htmlAttr(tag, 'height'),
+        context
+      });
     } catch {
       // Ignore invalid media URLs.
     }
   }
-  return [...new Set(media)];
+  const seen = new Set();
+  return media.filter(item => {
+    if (seen.has(item.src)) return false;
+    seen.add(item.src);
+    return true;
+  });
+}
+
+function firstSrcsetUrl(value) {
+  const first = String(value || '').split(',').map(item => item.trim()).filter(Boolean)[0] || '';
+  return first.split(/\s+/)[0] || '';
+}
+
+function nearbyText(html, index) {
+  const start = Math.max(0, Number(index || 0) - 450);
+  const end = Math.min(String(html || '').length, Number(index || 0) + 650);
+  return stripTags(String(html || '').slice(start, end)).slice(0, 260);
 }
 
 function extractJsonLd(html) {
@@ -767,18 +958,88 @@ function normalizeUrlList(value) {
   return raw.map(item => typeof item === 'string' ? item : item?.url).map(s => String(s || '').trim()).filter(Boolean);
 }
 
-function getMcpTools(req, body) {
+async function refreshProviderAccessToken(providerName, store) {
+  const { provider, clientId, clientSecret } = oauthProviderConfig(providerName);
+  const existing = store.providers?.[providerName];
+  if (!provider || !clientId || !existing?.refresh_token) {
+    return { accessToken: '', refreshed: false, reason: 'not_refreshable' };
+  }
+
+  const params = new URLSearchParams();
+  params.set('client_id', clientId);
+  if (clientSecret) params.set('client_secret', clientSecret);
+  params.set('grant_type', 'refresh_token');
+  params.set('refresh_token', existing.refresh_token);
+  if (provider.sendScopeInTokenRequest) params.set('scope', provider.scopes.join(' '));
+
+  const response = await fetch(provider.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: params.toString()
+  });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Handled below.
+  }
+
+  if (!response.ok || !data?.access_token) {
+    delete store.providers?.[providerName];
+    return {
+      accessToken: '',
+      refreshed: false,
+      reason: data?.error_description || data?.error || `refresh_http_${response.status}`
+    };
+  }
+
+  const expiresIn = Number(data.expires_in || 3600);
+  store.providers[providerName] = {
+    ...existing,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || existing.refresh_token,
+    expires_at: Date.now() + expiresIn * 1000,
+    scope: data.scope || existing.scope || provider.scopes.join(' '),
+    token_type: data.token_type || existing.token_type || 'Bearer',
+    updated_at: Date.now()
+  };
+
+  return { accessToken: data.access_token, refreshed: true, reason: '' };
+}
+
+async function providerAccess(req, providerName, store) {
+  const token = store.providers?.[providerName];
+  if (!token?.access_token) return { accessToken: '', refreshed: false, reason: 'not_connected' };
+  if (!token.expires_at || Date.now() <= token.expires_at - 30000) {
+    return { accessToken: token.access_token, refreshed: false, reason: '' };
+  }
+  if (!token.refresh_token) return { accessToken: '', refreshed: false, reason: 'expired_without_refresh_token' };
+  return refreshProviderAccessToken(providerName, store);
+}
+
+async function getMcpTools(req, body) {
   const tools = [];
+  const store = readOAuthStore(req);
+  let refreshed = false;
+  const providerCache = new Map();
   const selectedConnectorIds = Array.isArray(body.connector_ids) ? body.connector_ids : [];
   for (const id of selectedConnectorIds) {
     const connector = CONNECTORS[id];
     if (!connector) continue;
-    const token = getProviderToken(req, connector.provider);
+    if (!providerCache.has(connector.provider)) {
+      providerCache.set(connector.provider, await providerAccess(req, connector.provider, store));
+    }
+    const tokenState = providerCache.get(connector.provider);
+    refreshed = refreshed || Boolean(tokenState.refreshed);
+    const token = tokenState.accessToken;
     if (!token) {
       throw Object.assign(new Error(`OAuth requerido para ${connector.label}`), {
         status: 401,
         oauth_provider: connector.provider,
-        oauth_url: `${APP_BASE_PATH}/api/oauth/start/${connector.provider}?return_to=${encodeURIComponent(APP_BASE_PATH || '/')}`
+        oauth_url: `${apiRouteFor(req, `/api/oauth/start/${connector.provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+        oauth_reason: tokenState.reason,
+        oauth_status: publicTokenMeta(store.providers?.[connector.provider])
       });
     }
     tools.push({
@@ -805,7 +1066,10 @@ function getMcpTools(req, body) {
     tools.push(tool);
   }
 
-  return tools;
+  return {
+    tools,
+    refreshed_cookie: refreshed ? writeOAuthStore(req, store) : ''
+  };
 }
 
 function sanitizeServerLabel(value) {
@@ -859,38 +1123,124 @@ async function callOpenAI(req, payload) {
   return data;
 }
 
-function buildAnalysisPrompt(req, body, scraped) {
+function isImageFile(file = {}) {
+  const type = String(file.type || '').toLowerCase();
+  const name = String(file.name || '').toLowerCase();
+  return type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
+function isSupportedImageUrl(value) {
+  const text = String(value || '').trim();
+  return /^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(text) || /^https:\/\//i.test(text);
+}
+
+function compactScrapedProfiles(scraped = []) {
+  return scraped.map(item => ({
+    ok: Boolean(item.ok),
+    url: item.url,
+    final_url: item.final_url,
+    status: item.status,
+    title: item.title,
+    description: item.description,
+    author: item.author,
+    published_time: item.published_time,
+    modified_time: item.modified_time,
+    language: item.language,
+    headings: Array.isArray(item.headings) ? item.headings.slice(0, 24) : [],
+    topics: Array.isArray(item.topics) ? item.topics.slice(0, 24) : [],
+    hashtags: Array.isArray(item.hashtags) ? item.hashtags.slice(0, 32) : [],
+    mentions: Array.isArray(item.mentions) ? item.mentions.slice(0, 24) : [],
+    text: String(item.text || '').slice(0, 28000),
+    links: Array.isArray(item.links) ? item.links.slice(0, 35) : [],
+    media: Array.isArray(item.media) ? item.media.slice(0, 24) : [],
+    stats: item.stats || {},
+    error: item.error
+  }));
+}
+
+function collectScrapedImages(scraped = []) {
+  const images = [];
+  const seen = new Set();
+  for (const page of scraped) {
+    for (const media of Array.isArray(page.media) ? page.media : []) {
+      const src = typeof media === 'string' ? media : media?.src;
+      if (!src || seen.has(src) || !/^https:\/\//i.test(src)) continue;
+      seen.add(src);
+      images.push({
+        src,
+        alt: typeof media === 'string' ? '' : media.alt || '',
+        context: typeof media === 'string' ? '' : media.context || '',
+        source_url: page.final_url || page.url || ''
+      });
+    }
+  }
+  return images;
+}
+
+function buildAnalysisPrompt(req, body, scraped, tools = []) {
   const files = Array.isArray(body.files) ? body.files : [];
   const notes = String(body.notes || '').trim();
   const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
-  const fileSummaries = files.slice(0, 12).map(file => ({
+  const textFiles = files.filter(file => !isImageFile(file));
+  const imageFiles = files.filter(isImageFile).slice(0, MAX_UPLOADED_IMAGES_FOR_VISION);
+  const fileSummaries = textFiles.slice(0, 12).map(file => ({
     name: String(file.name || 'archivo'),
     type: String(file.type || ''),
     size: Number(file.size || 0),
     text: String(file.text || '').slice(0, 12000)
   }));
+  const imageSummaries = imageFiles.map(file => ({
+    name: String(file.name || 'imagen'),
+    type: String(file.type || ''),
+    size: Number(file.size || 0),
+    has_inline_image: Boolean(file.data_url || file.url)
+  }));
+  const scrapedImages = collectScrapedImages(scraped).slice(0, MAX_SCRAPED_IMAGES_FOR_VISION);
+  const content = [
+    {
+      type: 'input_text',
+      text: JSON.stringify({
+        task: 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados, imagenes subidas y perfiles publicos scrapeados.',
+        notes,
+        selected_connectors: selected,
+        files: fileSummaries,
+        uploaded_images: imageSummaries,
+        scraped_public_images_sent_to_vision: scrapedImages.map(image => ({
+          url: image.src,
+          alt: image.alt,
+          context: image.context,
+          source_url: image.source_url
+        })),
+        scraped_profiles: compactScrapedProfiles(scraped)
+      }, null, 2)
+    }
+  ];
+
+  for (const file of imageFiles) {
+    const imageUrl = String(file.data_url || file.url || '').trim();
+    if (isSupportedImageUrl(imageUrl)) content.push({ type: 'input_image', image_url: imageUrl });
+  }
+  for (const image of scrapedImages) {
+    if (isSupportedImageUrl(image.src)) content.push({ type: 'input_image', image_url: image.src });
+  }
 
   return {
     model: body.model || DEFAULT_MODEL,
     instructions: [
       'Eres PsychApp, una herramienta de apoyo para reflexión psicológica estructurada.',
       'No diagnostiques ni sustituyas evaluación clínica. Señala incertidumbre, límites y riesgos.',
-      'Usa los datos conectados, archivos y scraping público como evidencia; separa observación, hipótesis y acciones prudentes.',
-      'Devuelve el resultado en español con secciones: lectura global, patrones, señales temporales, hipótesis, preguntas útiles, próximos pasos y límites.'
+      'Usa datos conectados, archivos, imagenes subidas y scraping publico como evidencia; separa observacion, hipotesis y acciones prudentes.',
+      'Describe las fotos subidas y las imagenes publicas accesibles sin identificar personas ni inferir atributos sensibles. Centrate en escena, objetos, actividad, texto visible, tono visual y limites de confianza.',
+      'El scraping debe resumir temas tratados, relatos recurrentes, senales temporales, hashtags, enlaces relevantes, contenido visual y evidencias por URL; no te limites a contar posts o metadatos.',
+      'Devuelve el resultado en espanol con secciones: lectura global, temas detectados, evidencias por fuente, analisis visual, patrones, senales temporales, hipotesis prudentes, preguntas utiles, proximos pasos y limites.'
     ].join('\n'),
     input: [
       {
         role: 'user',
-        content: JSON.stringify({
-          task: 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados y perfiles públicos scrapeados.',
-          notes,
-          selected_connectors: selected,
-          files: fileSummaries,
-          scraped_profiles: scraped
-        }, null, 2)
+        content
       }
     ],
-    tools: getMcpTools(req, body),
+    tools,
     max_output_tokens: positiveInt(body.max_output_tokens, 2500),
     store: process.env.OPENAI_STORE === 'true'
   };
@@ -903,7 +1253,8 @@ async function handleAnalyze(req, res) {
     const scraped = [];
     for (const url of profileUrls.slice(0, 12)) scraped.push(await scrapeOne(url));
 
-    const payload = buildAnalysisPrompt(req, body, scraped);
+    const mcp = await getMcpTools(req, body);
+    const payload = buildAnalysisPrompt(req, body, scraped, mcp.tools);
     if (!payload.tools?.length) delete payload.tools;
     const openai = await callOpenAI(req, payload);
     const output_text = extractOutputText(openai);
@@ -918,7 +1269,7 @@ async function handleAnalyze(req, res) {
       saved: save,
       raw_id: openai.id || null,
       raw_status: openai.status || null
-    });
+    }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
     return sendJson(res, error.status || 500, {
       ok: false,
@@ -926,6 +1277,8 @@ async function handleAnalyze(req, res) {
         message: error.message || 'Analysis error',
         oauth_provider: error.oauth_provider,
         oauth_url: error.oauth_url,
+        oauth_reason: error.oauth_reason,
+        oauth_status: error.oauth_status,
         diagnostic: error.diagnostic,
         upstream: error.upstream
       }
@@ -943,10 +1296,12 @@ async function handleMessages(req, res) {
       model: body.model || DEFAULT_MODEL,
       instructions: body.system || undefined,
       input,
-      tools: getMcpTools(req, body),
+      tools: [],
       max_output_tokens: positiveInt(body.max_output_tokens || body.max_tokens, 1800),
       store: process.env.OPENAI_STORE === 'true'
     };
+    const mcp = await getMcpTools(req, body);
+    payload.tools = mcp.tools;
     if (!payload.tools.length) delete payload.tools;
     const openai = await callOpenAI(req, payload);
     return sendJson(res, 200, {
@@ -954,13 +1309,15 @@ async function handleMessages(req, res) {
       provider: 'openai',
       raw_id: openai.id || null,
       raw_status: openai.status || null
-    });
+    }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
     return sendJson(res, error.status || 500, {
       error: {
         message: error.message || 'OpenAI proxy error',
         oauth_provider: error.oauth_provider,
         oauth_url: error.oauth_url,
+        oauth_reason: error.oauth_reason,
+        oauth_status: error.oauth_status,
         diagnostic: error.diagnostic,
         upstream: error.upstream
       }
@@ -979,6 +1336,8 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
       notes_present: Boolean(body.notes),
       connector_ids: Array.isArray(body.connector_ids) ? body.connector_ids : [],
       file_count: Array.isArray(body.files) ? body.files.length : 0,
+      image_file_count: Array.isArray(body.files) ? body.files.filter(isImageFile).length : 0,
+      text_file_count: Array.isArray(body.files) ? body.files.filter(file => !isImageFile(file)).length : 0,
       profile_urls: normalizeUrlList(body.profile_urls || [])
     },
     scraped,
@@ -986,7 +1345,9 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
       output_text,
       openai_id: openai.id || null,
       openai_status: openai.status || null,
-      model: body.model || DEFAULT_MODEL
+      model: body.model || DEFAULT_MODEL,
+      scraped_topics: scraped.flatMap(item => Array.isArray(item.topics) ? item.topics : []).slice(0, 80),
+      scraped_image_count: collectScrapedImages(scraped).length
     },
     user_agent: req.headers['user-agent'] || ''
   };
@@ -1016,6 +1377,8 @@ function publicDiagnostics(req = null) {
     ok: true,
     app_base_path: APP_BASE_PATH || '/',
     public_base_url: req ? absoluteBaseUrl(req) : process.env.PUBLIC_BASE_URL || '',
+    request_base_url: req ? requestBaseUrl(req) : '',
+    configured_public_base_url: process.env.PUBLIC_BASE_URL || '',
     provider: 'openai',
     openai: {
       key_present: Boolean(keyInfo.value),
@@ -1037,6 +1400,10 @@ function publicDiagnostics(req = null) {
     scraper: {
       timeout_ms: SCRAPE_TIMEOUT_MS,
       max_bytes: SCRAPE_MAX_BYTES,
+      max_links: SCRAPE_MAX_LINKS,
+      max_media: SCRAPE_MAX_MEDIA,
+      max_uploaded_images_for_vision: MAX_UPLOADED_IMAGES_FOR_VISION,
+      max_scraped_images_for_vision: MAX_SCRAPED_IMAGES_FOR_VISION,
       blocks_private_hosts: true
     },
     supabase: {
@@ -1071,7 +1438,7 @@ function routePath(req) {
 
 function serveStatic(req, res, originalPathname, strippedPathname) {
   if (!APP_BASE_PATH && originalPathname === '/') return serveFile(res, path.join(DIST, 'index.html'));
-  if (APP_BASE_PATH && originalPathname === '/') return redirect(res, `${APP_BASE_PATH}/`);
+  if (APP_BASE_PATH && originalPathname === '/') return serveFile(res, path.join(DIST, 'index.html'));
 
   let urlPath = decodeURIComponent(strippedPathname);
   if (urlPath === '/') urlPath = '/index.html';

@@ -1,13 +1,13 @@
 {
   "name": "PsychApp Psyche Deep",
   "short_name": "PsychApp",
-  "start_url": "/psychapp/",
+  "start_url": ".",
   "display": "standalone",
-  "background_color": "#f7f3ea",
-  "theme_color": "#15221f",
+  "background_color": "#eef6ff",
+  "theme_color": "#145db2",
   "icons": [
     {
-      "src": "/psychapp/icons/icon.svg",
+      "src": "icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

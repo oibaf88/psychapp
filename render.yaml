@@ -27,6 +27,8 @@ services:
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
         sync: false
+      - key: MICROSOFT_TENANT
+        value: common
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

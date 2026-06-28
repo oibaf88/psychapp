@@ -11,6 +11,7 @@ import {
   FileText,
   FolderOpen,
   Globe2,
+  Image as ImageIcon,
   Link2,
   Loader2,
   Mail,
@@ -25,13 +26,20 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = window.location.pathname.startsWith('/psychapp') ? '/psychapp/api' : '/api';
+const BUILD_BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+const PATH_BASE = BUILD_BASE && BUILD_BASE !== '/' && (
+  window.location.pathname === BUILD_BASE || window.location.pathname.startsWith(`${BUILD_BASE}/`)
+) ? BUILD_BASE : '';
+const API_BASE = `${PATH_BASE}/api`;
+const HOME_PATH = `${PATH_BASE || ''}/`;
+const MAX_INLINE_IMAGE_BYTES = 7 * 1024 * 1024;
 
 const CONNECTORS = [
   { id: 'gmail', label: 'Gmail', provider: 'google', icon: Mail },
   { id: 'google_drive', label: 'Google Drive', provider: 'google', icon: FolderOpen },
   { id: 'google_calendar', label: 'Google Calendar', provider: 'google', icon: CalendarDays },
   { id: 'outlook', label: 'Outlook Mail', provider: 'microsoft', icon: Mail },
+  { id: 'outlook_calendar', label: 'Outlook Calendar', provider: 'microsoft', icon: CalendarDays },
   { id: 'sharepoint', label: 'OneDrive / SharePoint', provider: 'microsoft', icon: Cloud },
   { id: 'teams', label: 'Microsoft Teams', provider: 'microsoft', icon: Users }
 ];
@@ -42,7 +50,8 @@ const EXPORT_SOURCES = [
   'Instagram .json',
   'Thunderbird .mbox',
   'Dropbox .csv .txt',
-  'Proton Drive .txt .md'
+  'Proton Drive .txt .md',
+  'Fotos .jpg .png .webp'
 ];
 
 function App() {
@@ -74,8 +83,8 @@ function App() {
     setError('');
     try {
       const [healthRes, oauthRes] = await Promise.all([
-        fetch(`${API_BASE}/health`),
-        fetch(`${API_BASE}/oauth/status`)
+        fetch(`${API_BASE}/health`, { credentials: 'include' }),
+        fetch(`${API_BASE}/oauth/status`, { credentials: 'include' })
       ]);
       setHealth(await healthRes.json());
       setOauth(await oauthRes.json());
@@ -96,13 +105,13 @@ function App() {
   }
 
   async function connectProvider(provider) {
-    window.location.href = `${API_BASE}/oauth/start/${provider}?return_to=${encodeURIComponent(window.location.pathname)}`;
+    window.location.href = `${API_BASE}/oauth/start/${provider}?return_to=${encodeURIComponent(`${window.location.pathname}${window.location.search}` || HOME_PATH)}`;
   }
 
   async function disconnectProvider(provider) {
     setBusy(`disconnect-${provider}`);
     try {
-      await fetch(`${API_BASE}/oauth/logout/${provider}`, { method: 'POST' });
+      await fetch(`${API_BASE}/oauth/logout/${provider}`, { method: 'POST', credentials: 'include' });
       await refreshStatus();
     } finally {
       setBusy('');
@@ -113,17 +122,43 @@ function App() {
     const selected = [...event.target.files].slice(0, 12);
     const next = [];
     for (const file of selected) {
-      const text = await file.text();
-      next.push({
-        id: crypto.randomUUID(),
-        name: file.name,
-        type: file.type || 'text/plain',
-        size: file.size,
-        text: text.slice(0, 60000)
-      });
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+      if (isImage) {
+        if (file.size > MAX_INLINE_IMAGE_BYTES) {
+          setError(`La imagen ${file.name} pesa demasiado para enviarla inline.`);
+          continue;
+        }
+        next.push({
+          id: crypto.randomUUID(),
+          kind: 'image',
+          name: file.name,
+          type: file.type || 'image/jpeg',
+          size: file.size,
+          data_url: await readAsDataUrl(file)
+        });
+      } else {
+        const text = await file.text();
+        next.push({
+          id: crypto.randomUUID(),
+          kind: 'text',
+          name: file.name,
+          type: file.type || 'text/plain',
+          size: file.size,
+          text: text.slice(0, 60000)
+        });
+      }
     }
     setFiles(current => [...current, ...next]);
     event.target.value = '';
+  }
+
+  function readAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('No se pudo leer la imagen.'));
+      reader.readAsDataURL(file);
+    });
   }
 
   function updateProfile(id, patch) {
@@ -141,6 +176,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/scrape`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ urls: activeProfileUrls })
       });
@@ -168,6 +204,7 @@ function App() {
         : [];
       const response = await fetch(`${API_BASE}/analyze`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           notes,
@@ -180,7 +217,8 @@ function App() {
       const data = await response.json();
       if (!response.ok) {
         if (data?.error?.oauth_url) {
-          setError(`${data.error.message}. Abriendo OAuth...`);
+          const reason = data.error.oauth_reason ? ` (${data.error.oauth_reason})` : '';
+          setError(`${data.error.message}${reason}. Abriendo OAuth...`);
           window.location.href = data.error.oauth_url;
           return;
         }
@@ -199,7 +237,7 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/psychapp/">
+        <a className="brand" href={HOME_PATH}>
           <span className="brand-mark">ΨD</span>
           <span>
             <strong>PsychApp</strong>
@@ -326,7 +364,7 @@ function App() {
               </div>
               <label className="upload-zone">
                 <Archive size={22} />
-                <input type="file" multiple onChange={readFiles} accept=".txt,.md,.json,.csv,.mbox,.js" />
+                <input type="file" multiple onChange={readFiles} accept=".txt,.md,.json,.csv,.mbox,.js,.html,.xml,image/png,image/jpeg,image/webp,image/gif" />
                 <span>{files.length ? `${files.length} archivo(s) cargado(s)` : 'Seleccionar exports'}</span>
               </label>
               <div className="export-chips">
@@ -336,7 +374,7 @@ function App() {
                 <div className="file-list">
                   {files.map(file => (
                     <button key={file.id} className="file-row" onClick={() => setFiles(current => current.filter(item => item.id !== file.id))} title="Quitar archivo">
-                      <FileText size={16} />
+                      {file.kind === 'image' ? <ImageIcon size={16} /> : <FileText size={16} />}
                       <span>{file.name}</span>
                       <Trash2 size={15} />
                     </button>
@@ -412,8 +450,30 @@ function App() {
                   {scrapePreview.map(item => (
                     <article key={`${item.url}-${item.fetched_at}`} className={item.ok ? 'scrape-ok' : 'scrape-fail'}>
                       <strong>{item.title || item.url}</strong>
-                      <span>{item.status || 'ERR'} · {item.elapsed_ms} ms · {item.bytes_read || 0} bytes</span>
+                      <span>{item.status || 'ERR'} · {item.elapsed_ms} ms · {item.stats?.words || 0} palabras · {item.media?.length || 0} medios</span>
                       <p>{item.description || item.text || item.error}</p>
+                      {item.topics?.length > 0 && (
+                        <div className="topic-list">
+                          {item.topics.slice(0, 10).map(topic => (
+                            <span key={topicKey(topic)}>{topicLabel(topic)}</span>
+                          ))}
+                        </div>
+                      )}
+                      {item.headings?.length > 0 && (
+                        <ul className="evidence-list">
+                          {item.headings.slice(0, 4).map(heading => <li key={heading}>{heading}</li>)}
+                        </ul>
+                      )}
+                      {item.media?.length > 0 && (
+                        <div className="media-evidence">
+                          {item.media.slice(0, 4).map(media => (
+                            <a href={media.src || media} target="_blank" rel="noreferrer" key={media.src || media}>
+                              <ImageIcon size={14} />
+                              <span>{media.alt || media.title || media.context || 'Imagen publica'}</span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -462,6 +522,17 @@ function ConnectorToggle({ connector, selected, connected, onToggle }) {
       </span>
     </label>
   );
+}
+
+function topicLabel(topic) {
+  if (typeof topic === 'string') return topic;
+  const term = topic?.term || 'tema';
+  return topic?.count ? `${term} (${topic.count})` : term;
+}
+
+function topicKey(topic) {
+  if (typeof topic === 'string') return topic;
+  return `${topic?.term || 'tema'}-${topic?.count || topic?.source || ''}`;
 }
 
 createRoot(document.getElementById('root')).render(<App />);
