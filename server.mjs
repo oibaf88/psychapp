@@ -243,6 +243,26 @@ function getOpenAIKeyWithMeta() {
   return findSecret(['OPENAI_API_KEY', 'OPENAI_API_SECRET', 'OPENAI_KEY', 'openai_api_key', 'openai_api_secret']);
 }
 
+function getSupabaseKeyWithMeta() {
+  return findSecret([
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'SUPABASE_ANON_KEY',
+    'SUPABASE_PUBLISHABLE_KEY',
+    'SUPABASE_KEY',
+    'supabase_service_role_key',
+    'supabase_anon_key',
+    'supabase_publishable_key'
+  ]);
+}
+
+function supabaseKeyKind(source = '') {
+  const text = String(source || '').toLowerCase();
+  if (text.includes('service_role')) return 'service_role';
+  if (text.includes('anon')) return 'anon';
+  if (text.includes('publishable')) return 'publishable';
+  return source ? 'configured' : '';
+}
+
 function safeSource(source) {
   return source ? source.replace(/:.+$/, ':***') : '';
 }
@@ -1575,8 +1595,8 @@ async function handleMessages(req, res) {
 
 async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
   const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
-  const serviceKey = normalizeSecret(process.env.SUPABASE_SERVICE_ROLE_KEY, ['SUPABASE_SERVICE_ROLE_KEY']);
-  if (!supabaseUrl || !serviceKey) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
+  const supabaseKey = getSupabaseKeyWithMeta();
+  if (!supabaseUrl || !supabaseKey.value) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
 
   const row = {
     app_path: APP_BASE_PATH || '/',
@@ -1606,8 +1626,8 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
   const response = await fetch(`${supabaseUrl}/rest/v1/psychapp_runs`, {
     method: 'POST',
     headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
+      apikey: supabaseKey.value,
+      Authorization: `Bearer ${supabaseKey.value}`,
       'Content-Type': 'application/json',
       Prefer: 'return=minimal'
     },
@@ -1623,6 +1643,7 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
 
 function publicDiagnostics(req = null) {
   const keyInfo = getOpenAIKeyWithMeta();
+  const supabaseKey = getSupabaseKeyWithMeta();
   const store = req ? readOAuthStore(req) : { providers: {} };
   return {
     ok: true,
@@ -1659,7 +1680,11 @@ function publicDiagnostics(req = null) {
       blocks_private_hosts: true
     },
     supabase: {
-      configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+      configured: Boolean(process.env.SUPABASE_URL && supabaseKey.value),
+      url_present: Boolean(process.env.SUPABASE_URL),
+      key_present: Boolean(supabaseKey.value),
+      key_source: safeSource(supabaseKey.source),
+      key_kind: supabaseKeyKind(supabaseKey.source)
     },
     node: process.version
   };
