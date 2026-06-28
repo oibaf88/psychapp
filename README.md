@@ -1,148 +1,47 @@
-# Psyche Deep Android PWA + OpenAI
+# PsychApp Integrated
 
-Aplicación React/Vite convertida desde el JSX original a una PWA usable en Android 16 con backend Node conectado a OpenAI.
+PsychApp/Psyche Deep con frontend React y backend Node para:
 
-## URL de producción
+- OpenAI Responses API con herramientas MCP remotas y conectores OAuth.
+- OAuth real de Google y Microsoft con tokens cifrados en cookie HttpOnly.
+- Scraping HTTP real de perfiles publicos mediante `/psychapp/api/scrape`.
+- Analisis integrado mediante `/psychapp/api/analyze`.
+- Persistencia opcional en Supabase con `supabase/migrations/202606280001_psychapp_runs.sql`.
+- Despliegue Render preparado para servir la app bajo `/psychapp`.
 
-```text
-https://psychapp.bfab.io
-```
+## Desarrollo
 
-Callbacks OAuth canónicas:
-
-```text
-Google:    https://psychapp.bfab.io/api/oauth/callback/google
-Microsoft: https://psychapp.bfab.io/api/oauth/callback/microsoft
-```
-
-## Qué incluye
-
-- Frontend React/Vite compilable.
-- PWA instalable desde Chrome en Android 16.
-- Backend Node en `server.mjs` que guarda la clave de OpenAI fuera del móvil/frontend.
-- Adaptador compatible con la app original: el frontend sigue esperando `{content:[{type:"text", text:"..."}]}`.
-- OpenAI Responses API usando `/v1/responses`.
-- OAuth interactivo para Google y Microsoft.
-- Conectores OpenAI/MCP para Gmail, Google Drive, Google Calendar, Outlook, Microsoft Calendar, Teams y SharePoint/OneDrive cuando el usuario autoriza OAuth.
-- Modo demo sin API real con `MOCK_AI=true`.
-
-## Documentación importante
-
-- Google OAuth: ver `README_OAUTH_SETUP.md`.
-- Microsoft OAuth / Outlook / Hotmail / Live / OneDrive: ver [`README_MICROSOFT_OAUTH.md`](./README_MICROSOFT_OAUTH.md).
-- Variables de entorno: ver [`README_ENVIRONMENT_VARIABLES.md`](./README_ENVIRONMENT_VARIABLES.md) y [`.env.example`](./.env.example).
-
-## Ejecución local en ordenador
-
-```bash
+```powershell
+copy .env.example .env.local
 npm install
-cp .env.example .env
-# edita .env y añade tus variables locales
 npm run build
 npm start
 ```
 
-Abre:
+En este entorno de Codex se usa el Node incluido por la app si `node` no esta en el PATH.
 
-```text
-http://localhost:10000
-```
+## Variables principales
 
-## Uso en Android 16
+- `OPENAI_API_KEY`: clave de OpenAI server-side.
+- `OPENAI_MODEL`: modelo para Responses API. Por defecto `gpt-5.5`.
+- `APP_BASE_PATH`: `/psychapp`.
+- `PUBLIC_BASE_URL`: `https://ondender.com/psychapp` en produccion.
+- `OAUTH_COOKIE_SECRET`: secreto largo para cifrar cookies OAuth.
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+- `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` si se quiere guardar cada analisis.
 
-Opción recomendada: desplegar el backend en Render/VPS y abrir la URL HTTPS en Chrome.
+## OAuth callbacks
 
-1. Sube este proyecto a GitHub.
-2. En Render, crea un Web Service Node.
-3. Build command:
+- Google: `/psychapp/api/oauth/callback/google`
+- Microsoft: `/psychapp/api/oauth/callback/microsoft`
 
-```bash
-npm install --no-audit --no-fund && npm run build
-```
+Con `PUBLIC_BASE_URL=https://ondender.com/psychapp`, las URLs completas son:
 
-4. Start command:
+- `https://ondender.com/psychapp/api/oauth/callback/google`
+- `https://ondender.com/psychapp/api/oauth/callback/microsoft`
 
-```bash
-node server.mjs
-```
+## Render
 
-5. Variables mínimas de entorno en Render:
-
-```text
-NODE_VERSION=22.22.0
-PORT=10000
-PUBLIC_BASE_URL=https://psychapp.bfab.io
-OAUTH_COOKIE_SECRET=una_cadena_larga_aleatoria
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_STORE=false
-MCP_REQUIRE_APPROVAL=never
-ALLOW_CUSTOM_OAUTH_SCOPES=false
-```
-
-6. OpenAI como Render Secret File:
-
-```text
-Filename: OPENAI_API_SECRET
-Contents: sk-proj-...
-Mounted path: /etc/secrets/OPENAI_API_SECRET
-```
-
-7. En Android 16: abre `https://psychapp.bfab.io` en Chrome → menú ⋮ → **Añadir a pantalla de inicio** / **Instalar app**.
-
-## Variables OAuth principales
-
-Google:
-
-```env
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
-```
-
-Microsoft:
-
-```env
-MICROSOFT_TENANT=consumers
-MICROSOFT_CLIENT_ID=...
-MICROSOFT_CLIENT_SECRET=...
-MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
-```
-
-Para Microsoft personal Outlook/Hotmail/Live, consulta `README_MICROSOFT_OAUTH.md`.
-
-## Uso solo desde Android con Termux
-
-También puedes ejecutarla localmente en el móvil:
-
-```bash
-pkg update
-pkg install nodejs git unzip
-cd psychapp
-npm install
-cp .env.example .env
-nano .env
-npm run build
-npm start
-```
-
-Luego abre en Chrome:
-
-```text
-http://127.0.0.1:10000
-```
-
-## Seguridad
-
-- No metas `OPENAI_API_KEY`, `OPENAI_API_SECRET`, `MICROSOFT_CLIENT_SECRET` ni `GOOGLE_CLIENT_SECRET` en React, `localStorage`, GitHub ni variables `VITE_*`.
-- El backend usa `OPENAI_STORE=false` por defecto.
-- OAuth de Google/Microsoft se hace por redirección interactiva; no guardes access tokens manuales en Render.
-- Los tokens OAuth se guardan por usuario en cookie cifrada HttpOnly.
-- Evita MCP de terceros no confiables: pueden recibir datos sensibles.
-
-## Modo demo
-
-```bash
-MOCK_AI=true npm start
-```
-
-Permite comprobar UI, PWA y flujo sin gastar tokens ni usar API real.
+`render.yaml` define un servicio web Node con healthcheck en `/psychapp/api/health`.
+Para que `https://ondender.com/psychapp` funcione, el dominio debe resolver y enrutar ese path hacia el servicio Render.

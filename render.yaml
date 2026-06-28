@@ -1,83 +1,32 @@
 services:
   - type: web
-    name: psyche-deep-openai
+    name: psychapp
     runtime: node
-    buildCommand: npm install --no-audit --no-fund && npm run build
-    startCommand: node boot-server-mcp.mjs
-    healthCheckPath: /api/health
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /psychapp/api/health
     envVars:
-      # ── Runtime ──────────────────────────────────────────────────────────────
       - key: NODE_VERSION
-        value: 22.22.0
-      - key: PORT
-        value: "10000"
-
-      # ── OpenAI ──────────────────────────────────────────────────────────────
-      - key: OPENAI_MODEL
-        value: gpt-4.1-mini
-      - key: OPENAI_STORE
-        value: "false"
-      # Prefer Render Secret File OPENAI_API_SECRET mounted at /etc/secrets/OPENAI_API_SECRET.
-      # Keep OPENAI_API_KEY unset unless you deliberately prefer a normal env var.
-      # If OpenAI returns openai_quota_exceeded, fix Usage/Limits/Billing for this exact project/key.
-      # For UI smoke tests without API spend, temporarily set MOCK_AI=true.
-
-      # ── App base URL (required for OAuth redirect URIs) ──────────────────────
+        value: 22
+      - key: APP_BASE_PATH
+        value: /psychapp
       - key: PUBLIC_BASE_URL
-        value: https://psychapp.bfab.io
-
-      # ── Cookie encryption secret (required) ─────────────────────────────────
-      # Generate with PowerShell:
-      # [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
-      - key: OAUTH_COOKIE_SECRET
+        value: https://ondender.com/psychapp
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: OPENAI_API_KEY
         sync: false
-
-      # ── OAuth safety ─────────────────────────────────────────────────────────
-      # Keep false while debugging; built-in safe scopes are used.
-      - key: ALLOW_CUSTOM_OAUTH_SCOPES
-        value: "false"
-
-      # ── Google OAuth ─────────────────────────────────────────────────────────
-      # Register exactly this redirect URI in Google Cloud Console:
-      # https://psychapp.bfab.io/api/oauth/callback/google
+      - key: OAUTH_COOKIE_SECRET
+        generateValue: true
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: GOOGLE_REDIRECT_URI
-        value: https://psychapp.bfab.io/api/oauth/callback/google
-
-      # ── Microsoft OAuth ──────────────────────────────────────────────────────
-      # Register exactly this redirect URI in Microsoft Entra:
-      # https://psychapp.bfab.io/api/oauth/callback/microsoft
-      # Use "consumers" for personal Microsoft accounts (Outlook/Hotmail/Live).
-      - key: MICROSOFT_TENANT
-        value: consumers
       - key: MICROSOFT_CLIENT_ID
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
         sync: false
-      - key: MICROSOFT_REDIRECT_URI
-        value: https://psychapp.bfab.io/api/oauth/callback/microsoft
-
-      # ── OpenAI connector approval mode ───────────────────────────────────────
-      - key: MCP_REQUIRE_APPROVAL
-        value: never
-
-      # ── PsychApp as remote MCP server for ChatGPT / OpenAI Apps SDK ──────────
-      - key: PSYCHAPP_MCP_PATH
-        value: /mcp
-      - key: PSYCHAPP_MCP_PUBLIC_BASE_URL
-        value: https://psychapp.bfab.io
-      - key: PSYCHAPP_MCP_SCOPES
-        value: psychapp:read psychapp:analyze
-      # Strongly recommended: set this in Render before connecting ChatGPT.
-      - key: PSYCHAPP_MCP_OWNER_PIN
-        sync: false
-      # Optional separate MCP signing secret. If unset, OAUTH_COOKIE_SECRET is reused.
-      - key: PSYCHAPP_MCP_OAUTH_SECRET
-        sync: false
-      # Optional Supabase persistence for audit/snapshots. Use service role server-side only.
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

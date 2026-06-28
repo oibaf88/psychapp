@@ -2,47 +2,39 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
+
+loadDotEnv(path.join(ROOT, '.env.local'));
 loadDotEnv(path.join(ROOT, '.env'));
 
 const DIST = path.join(ROOT, 'dist');
-const parsedPort = Number.parseInt(process.env.PORT || '10000', 10);
-const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 10000;
+const PORT = positiveInt(process.env.PORT, 10000);
+const APP_BASE_PATH = normalizeBasePath(process.env.APP_BASE_PATH || '/psychapp');
 const OPENAI_URL = process.env.OPENAI_URL || 'https://api.openai.com/v1/responses';
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
-const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 25 * 1024 * 1024);
-const SECRET_DIR = process.env.RENDER_SECRET_DIR || '/etc/secrets';
-const OPENAI_SECRET_FILE_NAME = 'OPENAI_API_SECRET';
-const OPENAI_SECRET_FILE_PATH = path.join(SECRET_DIR, OPENAI_SECRET_FILE_NAME);
-const COOKIE_NAME = 'psychapp_oauth';
-const STATE_COOKIE_NAME = 'psychapp_oauth_state';
-const OAUTH_COOKIE_TTL_SECONDS = Number(process.env.OAUTH_COOKIE_TTL_SECONDS || 60 * 60 * 24 * 7);
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
+const MAX_BODY_BYTES = positiveInt(process.env.MAX_BODY_BYTES, 20 * 1024 * 1024);
+const SCRAPE_TIMEOUT_MS = positiveInt(process.env.SCRAPE_TIMEOUT_MS, 12000);
+const SCRAPE_MAX_BYTES = positiveInt(process.env.SCRAPE_MAX_BYTES, 900 * 1024);
+const OAUTH_COOKIE = 'psychapp_oauth';
+const STATE_COOKIE = 'psychapp_oauth_state';
+const OAUTH_COOKIE_TTL_SECONDS = positiveInt(process.env.OAUTH_COOKIE_TTL_SECONDS, 60 * 60 * 24 * 7);
 const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'consumers';
 
-const CONNECTOR_BY_LABEL = {
-  gmail: 'connector_gmail',
-  googlemail: 'connector_gmail',
-  drive: 'connector_googledrive',
-  google_drive: 'connector_googledrive',
-  googledrive: 'connector_googledrive',
-  calendar: 'connector_googlecalendar',
-  google_calendar: 'connector_googlecalendar',
-  m365: 'connector_outlookemail',
-  microsoft365: 'connector_outlookemail',
-  outlook: 'connector_outlookemail',
-  outlook_email: 'connector_outlookemail',
-  outlook_calendar: 'connector_outlookcalendar',
-  teams: 'connector_microsoftteams',
-  sharepoint: 'connector_sharepoint',
-  onedrive: 'connector_sharepoint',
-  one_drive: 'connector_sharepoint',
-  dropbox: 'connector_dropbox'
+const CONNECTORS = {
+  gmail: { provider: 'google', connector_id: 'connector_gmail', label: 'Gmail' },
+  google_drive: { provider: 'google', connector_id: 'connector_googledrive', label: 'Google Drive' },
+  google_calendar: { provider: 'google', connector_id: 'connector_googlecalendar', label: 'Google Calendar' },
+  outlook: { provider: 'microsoft', connector_id: 'connector_outlookemail', label: 'Outlook Mail' },
+  outlook_calendar: { provider: 'microsoft', connector_id: 'connector_outlookcalendar', label: 'Outlook Calendar' },
+  sharepoint: { provider: 'microsoft', connector_id: 'connector_sharepoint', label: 'OneDrive / SharePoint' },
+  teams: { provider: 'microsoft', connector_id: 'connector_microsoftteams', label: 'Microsoft Teams' }
 };
 
-const GOOGLE_SCOPES = readScopesFromEnv('GOOGLE_SCOPES', [
+const GOOGLE_SCOPES = readScopes('GOOGLE_SCOPES', [
   'openid',
   'email',
   'profile',
@@ -51,7 +43,7 @@ const GOOGLE_SCOPES = readScopesFromEnv('GOOGLE_SCOPES', [
   'https://www.googleapis.com/auth/calendar.readonly'
 ]);
 
-const MICROSOFT_SCOPES = readScopesFromEnv('MICROSOFT_SCOPES', [
+const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
   'openid',
   'profile',
   'email',
@@ -80,7 +72,6 @@ const OAUTH_PROVIDERS = {
     label: 'Microsoft',
     authUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/oauth2/v2.0/authorize`,
     tokenUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/oauth2/v2.0/token`,
-    metadataUrl: `https://login.microsoftonline.com/${encodeURIComponent(MICROSOFT_TENANT)}/v2.0/.well-known/openid-configuration`,
     clientIdNames: ['MICROSOFT_CLIENT_ID', 'AZURE_CLIENT_ID', 'MS_CLIENT_ID'],
     clientSecretNames: ['MICROSOFT_CLIENT_SECRET', 'AZURE_CLIENT_SECRET', 'MS_CLIENT_SECRET'],
     redirectUriNames: ['MICROSOFT_REDIRECT_URI', 'AZURE_REDIRECT_URI', 'MS_REDIRECT_URI'],
@@ -90,40 +81,43 @@ const OAUTH_PROVIDERS = {
   }
 };
 
-function loadDotEnv(file) {
-  if (!fs.existsSync(file)) return;
-  const text = fs.readFileSync(file, 'utf8');
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
+function loadDotEnv(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const text = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     const idx = line.indexOf('=');
     if (idx < 0) continue;
     const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
-    if (!process.env[key]) process.env[key] = val;
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
   }
 }
 
-function readScopesFromEnv(name, fallback) {
-  if (process.env.ALLOW_CUSTOM_OAUTH_SCOPES !== 'true') return fallback;
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeBasePath(value) {
+  const clean = String(value || '').trim();
+  if (!clean || clean === '/') return '';
+  return `/${clean.replace(/^\/+|\/+$/g, '')}`;
+}
+
+function readScopes(name, fallback) {
   const raw = String(process.env[name] || '').trim();
   if (!raw) return fallback;
   const scopes = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
   return scopes.length ? scopes : fallback;
 }
 
-function readSecretFile(filePath) {
-  if (!filePath) return '';
-  try {
-    return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8').trim() : '';
-  } catch {
-    return '';
-  }
-}
-
-function normalizeSecret(raw, keyNames = []) {
-  let text = String(raw || '').trim();
+function normalizeSecret(value, keyNames = []) {
+  let text = String(value || '').trim();
   if (!text) return '';
   if (text.startsWith('Bearer ')) text = text.slice(7).trim();
   for (const keyName of keyNames) {
@@ -133,58 +127,66 @@ function normalizeSecret(raw, keyNames = []) {
   return text.replace(/^["']|["']$/g, '').trim();
 }
 
-function safeSecretFiles() {
-  try {
-    return fs.existsSync(SECRET_DIR) ? fs.readdirSync(SECRET_DIR).filter(name => !name.startsWith('.')).sort() : [];
-  } catch {
-    return [];
-  }
-}
-
 function findSecret(names) {
   for (const name of names) {
-    const env = normalizeSecret(process.env[name], names);
-    if (env) return { value: env, source: `env:${name}` };
+    const value = normalizeSecret(process.env[name], names);
+    if (value) return { value, source: `env:${name}` };
   }
-  for (const name of names) {
-    const candidates = [
-      path.join(SECRET_DIR, name),
-      path.join(SECRET_DIR, name.toLowerCase()),
-      path.join(SECRET_DIR, `${name}.txt`),
-      path.join(SECRET_DIR, `${name.toLowerCase()}.txt`),
-      path.join(ROOT, name),
-      path.join(ROOT, name.toLowerCase())
-    ];
-    for (const filePath of candidates) {
-      const file = normalizeSecret(readSecretFile(filePath), names);
-      if (file) return { value: file, source: `file:${filePath}` };
+
+  const secretDirs = [
+    process.env.RENDER_SECRET_DIR || '/etc/secrets',
+    ROOT
+  ];
+
+  for (const dir of secretDirs) {
+    for (const name of names) {
+      const candidates = [
+        path.join(dir, name),
+        path.join(dir, name.toLowerCase()),
+        path.join(dir, `${name}.txt`),
+        path.join(dir, `${name.toLowerCase()}.txt`)
+      ];
+      for (const filePath of candidates) {
+        try {
+          if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
+          const value = normalizeSecret(fs.readFileSync(filePath, 'utf8'), names);
+          if (value) return { value, source: `file:${filePath}` };
+        } catch {
+          // Ignore unreadable secret files.
+        }
+      }
     }
   }
   return { value: '', source: '' };
 }
 
 function getOpenAIKeyWithMeta() {
-  return findSecret(['OPENAI_API_KEY', 'OPENAI_API_SECRET', 'OPENAI_KEY', 'openai_api_key', 'openai_api_secret', 'openai_key']);
+  return findSecret(['OPENAI_API_KEY', 'OPENAI_API_SECRET', 'OPENAI_KEY', 'openai_api_key', 'openai_api_secret']);
 }
 
-function getOpenAIKey() {
-  return getOpenAIKeyWithMeta().value;
+function safeSource(source) {
+  return source ? source.replace(/:.+$/, ':***') : '';
 }
 
 function sendJson(res, status, payload, extraHeaders = {}) {
-  res.writeHead(status, {
+  const headers = {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     ...extraHeaders
-  });
+  };
+  res.writeHead(status, headers);
   res.end(status === 204 ? '' : JSON.stringify(payload));
 }
 
 function sendHtml(res, status, html, extraHeaders = {}) {
-  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...extraHeaders });
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...extraHeaders
+  });
   res.end(html);
 }
 
@@ -193,19 +195,8 @@ function redirect(res, location, extraHeaders = {}) {
   res.end();
 }
 
-function wantsJson(req, urlObj = null) {
-  const url = urlObj || new URL(req.url, `http://${req.headers.host}`);
-  const explicit = String(url.searchParams.get('format') || url.searchParams.get('response') || '').toLowerCase();
-  if (explicit === 'json') return true;
-  if (url.searchParams.get('json') === '1') return true;
-  const accept = String(req.headers.accept || '').toLowerCase();
-  const ctype = String(req.headers['content-type'] || '').toLowerCase();
-  return accept.includes('application/json') || ctype.includes('application/json');
-}
-
-function oauthReply(req, res, status, payload, htmlTitle = 'OAuth result', htmlMessage = '', returnTo = '/') {
-  if (wantsJson(req)) return sendJson(res, status, payload);
-  return sendHtml(res, status, oauthResultHtml(htmlTitle, htmlMessage || escapeHtml(payload?.message || payload?.error?.message || ''), returnTo));
+function methodNotAllowed(res, allowed) {
+  return sendJson(res, 405, { error: { message: `Method not allowed. Use ${allowed}.` } }, { Allow: allowed });
 }
 
 function readBody(req) {
@@ -226,52 +217,14 @@ function readBody(req) {
   });
 }
 
-async function readRequestParams(req, reqUrl) {
-  const params = new URLSearchParams(reqUrl.searchParams);
-  if (req.method !== 'POST') return params;
-  const body = await readBody(req);
-  const ctype = String(req.headers['content-type'] || '').toLowerCase();
-  if (ctype.includes('application/json')) {
-    try {
-      const json = JSON.parse(body || '{}');
-      for (const [k, v] of Object.entries(json)) if (v != null) params.set(k, String(v));
-    } catch {
-      // Leave existing query params as-is.
-    }
-    return params;
+async function readJsonBody(req) {
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error('JSON inválido'), { status: 400 });
   }
-  const form = new URLSearchParams(body);
-  for (const [k, v] of form.entries()) params.set(k, v);
-  return params;
-}
-
-function sanitizeServerName(name) {
-  return String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
-}
-
-function normalizeLabel(name) {
-  return String(name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-}
-
-function connectorForServer(srv) {
-  if (srv?.connector_id) return srv.connector_id;
-  const label = normalizeLabel(srv?.name || srv?.server_label || srv?.id || '');
-  if (CONNECTOR_BY_LABEL[label]) return CONNECTOR_BY_LABEL[label];
-  const url = String(srv?.url || srv?.server_url || '').toLowerCase();
-  if (url.includes('gmail')) return 'connector_gmail';
-  if (url.includes('drive') && url.includes('google')) return 'connector_googledrive';
-  if (url.includes('calendar') && url.includes('google')) return 'connector_googlecalendar';
-  if (url.includes('teams')) return 'connector_microsoftteams';
-  if (url.includes('sharepoint') || url.includes('onedrive')) return 'connector_sharepoint';
-  if (url.includes('microsoft') || url.includes('outlook') || url.includes('m365')) return 'connector_outlookemail';
-  if (url.includes('dropbox')) return 'connector_dropbox';
-  return '';
-}
-
-function providerForConnector(connectorId = '') {
-  if (['connector_gmail', 'connector_googledrive', 'connector_googlecalendar'].includes(connectorId)) return 'google';
-  if (['connector_outlookemail', 'connector_outlookcalendar', 'connector_microsoftteams', 'connector_sharepoint'].includes(connectorId)) return 'microsoft';
-  return '';
 }
 
 function parseCookies(req) {
@@ -281,7 +234,12 @@ function parseCookies(req) {
     if (idx < 0) continue;
     const key = part.slice(0, idx).trim();
     const val = part.slice(idx + 1).trim();
-    if (key) out[key] = decodeURIComponent(val);
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
+    }
   }
   return out;
 }
@@ -299,16 +257,10 @@ function cookieString(name, value, req, opts = {}) {
   return parts.join('; ');
 }
 
-function getCookieSecret() {
-  const configured = findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']);
-  if (configured.value) return configured.value;
-  const key = getOpenAIKey();
-  if (key) return key;
-  return 'dev-only-insecure-cookie-secret-change-me';
-}
-
 function cryptoKey() {
-  return crypto.createHash('sha256').update(getCookieSecret()).digest();
+  const configured = findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value;
+  const fallback = getOpenAIKeyWithMeta().value || 'dev-only-psychapp-cookie-secret-change-me';
+  return crypto.createHash('sha256').update(configured || fallback).digest();
 }
 
 function b64url(value) {
@@ -319,14 +271,10 @@ function randomUrlSafe(bytes = 32) {
   return crypto.randomBytes(bytes).toString('base64url');
 }
 
-async function sha256Base64Url(input) {
-  return crypto.createHash('sha256').update(input).digest('base64url');
-}
-
 function encryptJson(obj) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', cryptoKey(), iv);
-  const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(obj), 'utf8')), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(obj), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return [b64url(iv), b64url(tag), b64url(ciphertext)].join('.');
 }
@@ -337,7 +285,10 @@ function decryptJson(token) {
     if (!ivB64 || !tagB64 || !dataB64) return null;
     const decipher = crypto.createDecipheriv('aes-256-gcm', cryptoKey(), Buffer.from(ivB64, 'base64url'));
     decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
-    const plaintext = Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64url')), decipher.final()]).toString('utf8');
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(dataB64, 'base64url')),
+      decipher.final()
+    ]).toString('utf8');
     return JSON.parse(plaintext);
   } catch {
     return null;
@@ -363,14 +314,16 @@ function verifyStatePayload(value) {
 }
 
 function readOAuthStore(req) {
-  const data = decryptJson(parseCookies(req)[COOKIE_NAME]);
+  const data = decryptJson(parseCookies(req)[OAUTH_COOKIE]);
   if (!data || typeof data !== 'object') return { providers: {} };
   if (!data.providers || typeof data.providers !== 'object') data.providers = {};
   return data;
 }
 
 function writeOAuthStore(req, store) {
-  return cookieString(COOKIE_NAME, encryptJson({ ...store, updated_at: Date.now() }), req, { maxAge: OAUTH_COOKIE_TTL_SECONDS });
+  return cookieString(OAUTH_COOKIE, encryptJson({ ...store, updated_at: Date.now() }), req, {
+    maxAge: OAUTH_COOKIE_TTL_SECONDS
+  });
 }
 
 function publicTokenMeta(token = {}) {
@@ -404,28 +357,39 @@ function absoluteBaseUrl(req) {
   const configured = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
   if (configured) return configured;
   const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() || 'http';
-  return `${proto}://${req.headers.host}`;
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  return `${proto}://${host}${APP_BASE_PATH}`;
 }
 
 function redirectUriFor(req, providerName) {
   const provider = OAUTH_PROVIDERS[providerName];
-  if (!provider) return `${absoluteBaseUrl(req)}/api/oauth/callback/${providerName}`;
-  const explicit = findSecret(provider.redirectUriNames).value;
+  const explicit = provider ? findSecret(provider.redirectUriNames).value : '';
   return explicit || `${absoluteBaseUrl(req)}/api/oauth/callback/${providerName}`;
+}
+
+async function sha256Base64Url(input) {
+  return crypto.createHash('sha256').update(input).digest('base64url');
 }
 
 async function handleOAuthStart(req, res, providerName) {
   const { provider, clientId } = oauthProviderConfig(providerName);
   if (!provider) return sendJson(res, 404, { error: { message: `Proveedor OAuth no soportado: ${providerName}` } });
-  if (!clientId) return sendJson(res, 500, { error: { message: `Falta ${provider.label} OAuth client id. Configura ${provider.clientIdNames[0]} en Render Environment.`, required: provider.clientIdNames } });
+  if (!clientId) {
+    return sendJson(res, 500, {
+      error: {
+        message: `Falta ${provider.label} OAuth client id.`,
+        required: provider.clientIdNames,
+        redirect_uri: redirectUriFor(req, providerName)
+      }
+    });
+  }
 
   const reqUrl = new URL(req.url, absoluteBaseUrl(req));
-  const target = normalizeLabel(reqUrl.searchParams.get('target') || providerName);
-  const returnTo = reqUrl.searchParams.get('return_to') || '/';
+  const returnTo = reqUrl.searchParams.get('return_to') || `${APP_BASE_PATH || '/'}`;
   const state = randomUrlSafe(24);
   const verifier = randomUrlSafe(64);
   const challenge = await sha256Base64Url(verifier);
-  const statePayload = { provider: providerName, target, return_to: returnTo, state, verifier, created_at: Date.now() };
+  const statePayload = { provider: providerName, state, verifier, return_to: returnTo, created_at: Date.now() };
 
   const auth = new URL(provider.authUrl);
   auth.searchParams.set('client_id', clientId);
@@ -439,7 +403,7 @@ async function handleOAuthStart(req, res, providerName) {
   for (const [key, value] of Object.entries(provider.authExtras || {})) auth.searchParams.set(key, value);
 
   return redirect(res, auth.toString(), {
-    'Set-Cookie': cookieString(STATE_COOKIE_NAME, signStatePayload(statePayload), req, { maxAge: 600 })
+    'Set-Cookie': cookieString(STATE_COOKIE, signStatePayload(statePayload), req, { maxAge: 600 })
   });
 }
 
@@ -448,96 +412,64 @@ async function handleOAuthCallback(req, res, providerName) {
   if (!provider) return sendJson(res, 404, { error: { message: `Proveedor OAuth no soportado: ${providerName}` } });
 
   const reqUrl = new URL(req.url, absoluteBaseUrl(req));
-  const paramsIn = await readRequestParams(req, reqUrl);
-  const jsonMode = wantsJson(req, reqUrl);
-  const error = paramsIn.get('error');
+  const error = reqUrl.searchParams.get('error');
   if (error) {
-    const payload = { ok: false, provider: providerName, error: { code: error, message: paramsIn.get('error_description') || error } };
-    return oauthReply(req, res, 400, payload, 'OAuth denied', `Proveedor: ${provider.label}. Error: ${escapeHtml(error)}<br>${escapeHtml(paramsIn.get('error_description') || '')}`, '/');
+    return oauthReply(req, res, 400, {
+      ok: false,
+      provider: providerName,
+      error: { code: error, message: reqUrl.searchParams.get('error_description') || error }
+    }, 'OAuth cancelado', reqUrl.searchParams.get('error_description') || error, APP_BASE_PATH || '/');
   }
 
-  const code = paramsIn.get('code');
-  const state = paramsIn.get('state');
-  const statePayload = verifyStatePayload(parseCookies(req)[STATE_COOKIE_NAME]);
+  const code = reqUrl.searchParams.get('code');
+  const state = reqUrl.searchParams.get('state');
+  const statePayload = verifyStatePayload(parseCookies(req)[STATE_COOKIE]);
   if (!code || !state || !statePayload || statePayload.state !== state || statePayload.provider !== providerName) {
-    return oauthReply(req, res, 400, { ok: false, provider: providerName, error: { message: 'OAuth state invalid or missing. Start the flow from /api/oauth/start/' + providerName } }, 'OAuth state invalid', 'Reintenta la conexión desde la app.', '/');
+    return oauthReply(req, res, 400, {
+      ok: false,
+      provider: providerName,
+      error: { message: `OAuth state inválido. Reinicia desde ${APP_BASE_PATH}/api/oauth/start/${providerName}` }
+    }, 'OAuth inválido', 'Reinicia la conexión desde la app.', APP_BASE_PATH || '/');
   }
   if (Date.now() - Number(statePayload.created_at || 0) > 10 * 60 * 1000) {
-    return oauthReply(req, res, 400, { ok: false, provider: providerName, error: { message: 'OAuth request expired. Start again.' } }, 'OAuth expired', 'La solicitud caducó. Reintenta la conexión.', '/');
+    return oauthReply(req, res, 400, {
+      ok: false,
+      provider: providerName,
+      error: { message: 'OAuth caducado. Reinicia la conexión.' }
+    }, 'OAuth caducado', 'Reinicia la conexión desde la app.', APP_BASE_PATH || '/');
   }
 
-  const tokenParams = new URLSearchParams();
-  tokenParams.set('client_id', clientId);
-  if (clientSecret) tokenParams.set('client_secret', clientSecret);
-  tokenParams.set('code', code);
-  tokenParams.set('redirect_uri', redirectUriFor(req, providerName));
-  tokenParams.set('grant_type', 'authorization_code');
-  tokenParams.set('code_verifier', statePayload.verifier);
-  if (provider.sendScopeInTokenRequest) tokenParams.set('scope', provider.scopes.join(' '));
+  const params = new URLSearchParams();
+  params.set('client_id', clientId);
+  if (clientSecret) params.set('client_secret', clientSecret);
+  params.set('code', code);
+  params.set('redirect_uri', redirectUriFor(req, providerName));
+  params.set('grant_type', 'authorization_code');
+  params.set('code_verifier', statePayload.verifier);
+  if (provider.sendScopeInTokenRequest) params.set('scope', provider.scopes.join(' '));
 
   const tokenResponse = await fetch(provider.tokenUrl, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': 'application/json'
-    },
-    body: tokenParams.toString(),
-    redirect: 'manual'
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: params.toString()
   });
-
-  // 3xx from a token endpoint always means a configuration problem (wrong redirect_uri,
-  // wrong tenant, app not enabled for this account type, etc.) — never follow it because
-  // the destination is an HTML error/login page, not a JSON token response.
-  if (tokenResponse.status >= 300 && tokenResponse.status < 400) {
-    const location = (tokenResponse.headers.get('location') || '').slice(0, 300);
-    const redirectPayload = {
-      ok: false,
-      provider: providerName,
-      token_endpoint: provider.tokenUrl,
-      token_status: tokenResponse.status,
-      error: {
-        message: `${provider.label} token endpoint redirected (HTTP ${tokenResponse.status}) instead of returning a token. ` +
-          `Most common cause: the redirect URI "${redirectUriFor(req, providerName)}" is not registered in your ${provider.label} app, ` +
-          (providerName === 'microsoft' ? `or the app does not support "${MICROSOFT_TENANT}" accounts. ` : '') +
-          `Check your ${provider.label} app registration and make sure the redirect URI matches exactly (including https://).`,
-        redirect_location: location
-      }
-    };
-    return oauthReply(req, res, 400, redirectPayload, 'OAuth configuration error', escapeHtml(redirectPayload.error.message), '/');
-  }
-
   const tokenText = await tokenResponse.text();
-  const tokenContentType = tokenResponse.headers.get('content-type') || '';
-  let tokenJson;
-  try { tokenJson = JSON.parse(tokenText); } catch { tokenJson = null; }
-
-  if (!tokenResponse.ok || !tokenJson) {
-    const firstBytes = tokenText.slice(0, 300);
-    const isHtml = tokenContentType.includes('text/html') || firstBytes.trimStart().startsWith('<');
-    const htmlHint = isHtml
-      ? ` ${provider.label} returned an HTML page — the most common causes are: ` +
-        `(1) redirect URI "${redirectUriFor(req, providerName)}" not registered in ${provider.label} app, ` +
-        (providerName === 'microsoft' ? `(2) app not enabled for "${MICROSOFT_TENANT}" accounts (check "Supported account types" in Azure), ` : '') +
-        `(3) client_id or client_secret is wrong.`
-      : '';
-    const payload = {
-      ok: false,
-      provider: providerName,
-      token_endpoint: provider.tokenUrl,
-      token_status: tokenResponse.status,
-      token_content_type: tokenContentType,
-      error: {
-        message: (tokenJson?.error_description || tokenJson?.error || (tokenJson ? `HTTP ${tokenResponse.status}` : 'Token endpoint did not return JSON')) + htmlHint,
-        aadsts: extractAadsts(tokenJson?.error_description || tokenText),
-        non_json_response_preview: tokenJson ? undefined : firstBytes
-      }
-    };
-    return oauthReply(req, res, tokenResponse.ok ? 502 : tokenResponse.status, payload, 'OAuth token exchange failed', escapeHtml(payload.error.message), '/');
+  let tokenJson = null;
+  try {
+    tokenJson = JSON.parse(tokenText);
+  } catch {
+    // Handled below.
   }
 
-  if (!tokenJson.access_token) {
-    const payload = { ok: false, provider: providerName, error: { message: 'Token JSON did not include access_token', raw_status: tokenResponse.status } };
-    return oauthReply(req, res, 502, payload, 'OAuth token exchange failed', 'La respuesta JSON no contiene access_token.', '/');
+  if (!tokenResponse.ok || !tokenJson?.access_token) {
+    return oauthReply(req, res, tokenResponse.ok ? 502 : tokenResponse.status, {
+      ok: false,
+      provider: providerName,
+      error: {
+        message: tokenJson?.error_description || tokenJson?.error || `Token endpoint HTTP ${tokenResponse.status}`,
+        non_json_preview: tokenJson ? undefined : tokenText.slice(0, 280)
+      }
+    }, 'OAuth falló', tokenJson?.error_description || tokenJson?.error || `HTTP ${tokenResponse.status}`, APP_BASE_PATH || '/');
   }
 
   const store = readOAuthStore(req);
@@ -551,62 +483,43 @@ async function handleOAuthCallback(req, res, providerName) {
     updated_at: Date.now()
   };
 
-  const headers = [writeOAuthStore(req, store), cookieString(STATE_COOKIE_NAME, '', req, { maxAge: 0 })];
-  const returnTo = statePayload.return_to || '/';
-  if (jsonMode) {
-    return sendJson(res, 200, {
-      ok: true,
-      provider: providerName,
-      connected: true,
-      token_type: store.providers[providerName].token_type,
-      expires_at: store.providers[providerName].expires_at,
-      scope: store.providers[providerName].scope,
-      return_to: returnTo
-    }, { 'Set-Cookie': headers });
-  }
-  return redirect(res, `${returnTo}${returnTo.includes('?') ? '&' : '?'}oauth=${providerName}_connected`, { 'Set-Cookie': headers });
+  const headers = [
+    writeOAuthStore(req, store),
+    cookieString(STATE_COOKIE, '', req, { maxAge: 0 })
+  ];
+  return redirect(res, `${statePayload.return_to || APP_BASE_PATH || '/'}?oauth=${providerName}_connected`, {
+    'Set-Cookie': headers
+  });
 }
 
-function extractAadsts(text = '') {
-  const match = String(text).match(/AADSTS\d+/i);
-  return match ? match[0].toUpperCase() : '';
+function oauthReply(req, res, status, payload, title, message, returnTo) {
+  const accept = String(req.headers.accept || '').toLowerCase();
+  if (accept.includes('application/json')) return sendJson(res, status, payload);
+  return sendHtml(res, status, resultHtml(title, message, returnTo));
 }
 
-function oauthResultHtml(title, message, returnTo = '/') {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body style="font-family:system-ui;padding:2rem;line-height:1.5"><h1>${escapeHtml(title)}</h1><p>${message}</p><p><a href="${escapeHtml(returnTo)}">Volver a la app</a></p></body></html>`;
-}
-
-function escapeHtml(value) {
-  return String(value || '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+function resultHtml(title, message, returnTo) {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body style="font-family:system-ui;padding:2rem;line-height:1.5;background:#f7f3ea;color:#15221f"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="${escapeHtml(returnTo)}">Volver a PsychApp</a></p></body></html>`;
 }
 
 function handleOAuthStatus(req, res) {
   const store = readOAuthStore(req);
+  const providerStatus = {
+    google: publicTokenMeta(store.providers?.google),
+    microsoft: publicTokenMeta(store.providers?.microsoft)
+  };
   return sendJson(res, 200, {
     ok: true,
-    providers: {
-      google: publicTokenMeta(store.providers?.google),
-      microsoft: publicTokenMeta(store.providers?.microsoft)
-    },
-    connectors: connectorStatusFromStore(store),
+    providers: providerStatus,
+    connectors: Object.fromEntries(Object.entries(CONNECTORS).map(([id, connector]) => [
+      id,
+      {
+        ...connector,
+        connected: Boolean(providerStatus[connector.provider]?.connected)
+      }
+    ])),
     oauth_config: publicOAuthConfig(req)
   });
-}
-
-function connectorStatusFromStore(store) {
-  const google = publicTokenMeta(store.providers?.google).connected;
-  const microsoft = publicTokenMeta(store.providers?.microsoft).connected;
-  return {
-    gmail: { connected: google, provider: 'google', connector_id: 'connector_gmail' },
-    drive: { connected: google, provider: 'google', connector_id: 'connector_googledrive' },
-    google_calendar: { connected: google, provider: 'google', connector_id: 'connector_googlecalendar' },
-    m365: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_outlookemail' },
-    outlook: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_outlookemail' },
-    outlook_calendar: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_outlookcalendar' },
-    teams: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_microsoftteams' },
-    sharepoint: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_sharepoint' },
-    onedrive: { connected: microsoft, provider: 'microsoft', connector_id: 'connector_sharepoint', note: 'OpenAI currently exposes SharePoint connector, not a separate OneDrive connector.' }
-  };
 }
 
 function publicOAuthConfig(req) {
@@ -616,39 +529,287 @@ function publicOAuthConfig(req) {
       client_id_present: Boolean(clientId),
       client_secret_present: Boolean(clientSecret),
       redirect_uri: redirectUriFor(req, id),
-      auth_url: provider.authUrl,
-      token_url: provider.tokenUrl,
-      metadata_url: provider.metadataUrl || null,
-      scopes: provider.scopes,
-      scope_string: provider.scopes.join(' ')
+      scopes: provider.scopes
     }];
   }));
 }
 
 function handleOAuthLogout(req, res, providerName = '') {
   const store = readOAuthStore(req);
-  if (providerName && store.providers?.[providerName]) delete store.providers[providerName];
-  if (!providerName) store.providers = {};
-  return sendJson(res, 200, { ok: true, disconnected: providerName || 'all' }, { 'Set-Cookie': writeOAuthStore(req, store) });
+  if (providerName) delete store.providers?.[providerName];
+  else store.providers = {};
+  return sendJson(res, 200, { ok: true, disconnected: providerName || 'all' }, {
+    'Set-Cookie': writeOAuthStore(req, store)
+  });
 }
 
-function getOAuthTokenWithMeta(req, label, connectorId = '') {
-  const provider = providerForConnector(connectorId);
-  const accessToken = provider ? getProviderToken(req, provider) : '';
-  if (accessToken) return { value: accessToken, source: `oauth-cookie:${provider}` };
-  if (process.env.ALLOW_STATIC_OAUTH_TOKENS === 'true') {
-    const info = findSecret(tokenNamesFor(label, connectorId));
-    if (info.value) return info;
+function isBlockedHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) return true;
+  const ipType = net.isIP(host);
+  if (!ipType) return false;
+  if (ipType === 6) return host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80');
+  const parts = host.split('.').map(Number);
+  if (parts[0] === 10 || parts[0] === 127 || parts[0] === 0) return true;
+  if (parts[0] === 169 && parts[1] === 254) return true;
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  return false;
+}
+
+function validatePublicUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || '').trim());
+  } catch {
+    throw Object.assign(new Error(`URL inválida: ${value}`), { status: 400 });
   }
-  return { value: '', source: '' };
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw Object.assign(new Error(`Solo se permiten URLs http/https: ${url.href}`), { status: 400 });
+  }
+  if (isBlockedHost(url.hostname)) {
+    throw Object.assign(new Error(`Host no permitido para scraping: ${url.hostname}`), { status: 400 });
+  }
+  return url;
 }
 
-function tokenNamesFor(label, connectorId = '') {
-  const clean = sanitizeServerName(label);
-  const connector = sanitizeServerName(String(connectorId || '').replace(/^connector_/, ''));
-  const names = [`MCP_TOKEN_${clean}`, `MCP_AUTH_${clean}`, `${clean}_OAUTH_ACCESS_TOKEN`, `${clean}_ACCESS_TOKEN`, `${clean}_TOKEN`];
-  if (connector) names.push(`MCP_TOKEN_${connector}`, `${connector}_OAUTH_ACCESS_TOKEN`, `${connector}_ACCESS_TOKEN`, `${connector}_TOKEN`);
-  return [...new Set(names)];
+async function readLimitedText(response, maxBytes) {
+  if (!response.body?.getReader) return (await response.text()).slice(0, maxBytes);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      text += decoder.decode(value.slice(0, Math.max(0, value.byteLength - (total - maxBytes))), { stream: false });
+      try { await reader.cancel(); } catch {}
+      break;
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text;
+}
+
+async function scrapeOne(inputUrl) {
+  const url = validatePublicUrl(inputUrl);
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SCRAPE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url.href, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'PsychAppScraper/2.0 (+https://ondender.com/psychapp)',
+        Accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.5'
+      }
+    });
+    const contentType = response.headers.get('content-type') || '';
+    const raw = await readLimitedText(response, SCRAPE_MAX_BYTES);
+    const extracted = extractPage(raw, contentType, response.url || url.href);
+    return {
+      ok: response.ok,
+      url: url.href,
+      final_url: response.url || url.href,
+      status: response.status,
+      content_type: contentType,
+      fetched_at: new Date().toISOString(),
+      elapsed_ms: Date.now() - startedAt,
+      bytes_read: Buffer.byteLength(raw),
+      ...extracted
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url: url.href,
+      status: 0,
+      fetched_at: new Date().toISOString(),
+      elapsed_ms: Date.now() - startedAt,
+      error: error.name === 'AbortError' ? 'Scraping timeout' : error.message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function extractPage(raw, contentType, finalUrl) {
+  const text = String(raw || '');
+  if (contentType.includes('application/json')) {
+    return {
+      title: finalUrl,
+      description: '',
+      text: text.slice(0, 12000),
+      links: [],
+      media: [],
+      json: safeJsonPreview(text)
+    };
+  }
+
+  const title = firstMatch(text, /<title[^>]*>([\s\S]*?)<\/title>/i);
+  const description = metaContent(text, 'description') || metaProperty(text, 'og:description') || metaProperty(text, 'twitter:description');
+  const cleanHtml = text
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ');
+
+  const body = firstMatch(cleanHtml, /<body[^>]*>([\s\S]*?)<\/body>/i) || cleanHtml;
+  const visible = decodeEntities(body.replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 18000);
+
+  return {
+    title: decodeEntities(title || metaProperty(text, 'og:title') || finalUrl).trim(),
+    description: decodeEntities(description || '').trim(),
+    text: visible,
+    links: extractLinks(text, finalUrl),
+    media: extractMedia(text, finalUrl),
+    json_ld: extractJsonLd(text)
+  };
+}
+
+function safeJsonPreview(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function firstMatch(text, regex) {
+  const match = String(text || '').match(regex);
+  return match ? match[1] : '';
+}
+
+function metaContent(html, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return firstMatch(html, new RegExp(`<meta[^>]+name=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, 'i'));
+}
+
+function metaProperty(html, property) {
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return firstMatch(html, new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, 'i'));
+}
+
+function decodeEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractLinks(html, baseUrl) {
+  const links = [];
+  const regex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(regex)) {
+    if (links.length >= 40) break;
+    try {
+      const href = new URL(decodeEntities(match[1]), baseUrl).href;
+      const text = decodeEntities(match[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+      links.push({ href, text: text.slice(0, 180) });
+    } catch {
+      // Ignore invalid hrefs.
+    }
+  }
+  return links;
+}
+
+function extractMedia(html, baseUrl) {
+  const media = [];
+  const regex = /<(?:img|video|source)\s+[^>]*(?:src|poster)=["']([^"']+)["'][^>]*>/gi;
+  for (const match of html.matchAll(regex)) {
+    if (media.length >= 20) break;
+    try {
+      media.push(new URL(decodeEntities(match[1]), baseUrl).href);
+    } catch {
+      // Ignore invalid media URLs.
+    }
+  }
+  return [...new Set(media)];
+}
+
+function extractJsonLd(html) {
+  const blocks = [];
+  const regex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  for (const match of html.matchAll(regex)) {
+    if (blocks.length >= 5) break;
+    try {
+      blocks.push(JSON.parse(match[1].trim()));
+    } catch {
+      blocks.push({ raw: match[1].trim().slice(0, 1000) });
+    }
+  }
+  return blocks;
+}
+
+async function handleScrape(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const urls = normalizeUrlList(body.urls || body.url || []);
+    if (!urls.length) return sendJson(res, 400, { error: { message: 'Añade al menos una URL pública.' } });
+    const results = [];
+    for (const url of urls.slice(0, 12)) results.push(await scrapeOne(url));
+    return sendJson(res, 200, { ok: true, results });
+  } catch (error) {
+    return sendJson(res, error.status || 500, { error: { message: error.message || 'Scrape error' } });
+  }
+}
+
+function normalizeUrlList(value) {
+  const raw = Array.isArray(value) ? value : [value];
+  return raw.map(item => typeof item === 'string' ? item : item?.url).map(s => String(s || '').trim()).filter(Boolean);
+}
+
+function getMcpTools(req, body) {
+  const tools = [];
+  const selectedConnectorIds = Array.isArray(body.connector_ids) ? body.connector_ids : [];
+  for (const id of selectedConnectorIds) {
+    const connector = CONNECTORS[id];
+    if (!connector) continue;
+    const token = getProviderToken(req, connector.provider);
+    if (!token) {
+      throw Object.assign(new Error(`OAuth requerido para ${connector.label}`), {
+        status: 401,
+        oauth_provider: connector.provider,
+        oauth_url: `${APP_BASE_PATH}/api/oauth/start/${connector.provider}?return_to=${encodeURIComponent(APP_BASE_PATH || '/')}`
+      });
+    }
+    tools.push({
+      type: 'mcp',
+      server_label: id,
+      connector_id: connector.connector_id,
+      authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}`,
+      require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
+    });
+  }
+
+  const remoteServers = Array.isArray(body.remote_mcp_servers) ? body.remote_mcp_servers : [];
+  for (const server of remoteServers) {
+    const serverUrl = String(server?.server_url || server?.url || '').trim();
+    if (!serverUrl.startsWith('https://')) continue;
+    const tool = {
+      type: 'mcp',
+      server_label: sanitizeServerLabel(server?.server_label || server?.name || 'remote_mcp'),
+      server_url: serverUrl,
+      require_approval: server?.require_approval || process.env.MCP_REQUIRE_APPROVAL || 'never'
+    };
+    if (Array.isArray(server.allowed_tools) && server.allowed_tools.length) tool.allowed_tools = server.allowed_tools.map(String);
+    if (server.authorization) tool.authorization = String(server.authorization).startsWith('Bearer ') ? server.authorization : `Bearer ${server.authorization}`;
+    tools.push(tool);
+  }
+
+  return tools;
+}
+
+function sanitizeServerLabel(value) {
+  return String(value || 'mcp').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'mcp';
 }
 
 function extractOutputText(data) {
@@ -656,245 +817,327 @@ function extractOutputText(data) {
   if (typeof data.output_text === 'string') return data.output_text;
   const chunks = [];
   for (const item of data.output || []) {
-    if (item?.type === 'message') {
-      for (const c of item.content || []) {
-        if (typeof c.text === 'string') chunks.push(c.text);
-        else if (typeof c.output_text === 'string') chunks.push(c.output_text);
-      }
+    if (item?.type !== 'message') continue;
+    for (const content of item.content || []) {
+      if (typeof content.text === 'string') chunks.push(content.text);
+      if (typeof content.output_text === 'string') chunks.push(content.output_text);
     }
   }
-  return chunks.join('\n');
+  return chunks.join('\n').trim();
 }
 
-function normalizeMessages(messages = []) {
-  return messages.map(m => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')
+async function callOpenAI(req, payload) {
+  const keyInfo = getOpenAIKeyWithMeta();
+  if (!keyInfo.value) {
+    throw Object.assign(new Error('Falta OPENAI_API_KEY en el servidor.'), {
+      status: 500,
+      diagnostic: publicDiagnostics(req)
+    });
+  }
+
+  const response = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${keyInfo.value}`
+    },
+    body: JSON.stringify(payload)
+  });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Handled below.
+  }
+  if (!response.ok) {
+    throw Object.assign(new Error(data?.error?.message || text || `OpenAI HTTP ${response.status}`), {
+      status: response.status,
+      upstream: data || { raw: text.slice(0, 800) }
+    });
+  }
+  return data;
+}
+
+function buildAnalysisPrompt(req, body, scraped) {
+  const files = Array.isArray(body.files) ? body.files : [];
+  const notes = String(body.notes || '').trim();
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
+  const fileSummaries = files.slice(0, 12).map(file => ({
+    name: String(file.name || 'archivo'),
+    type: String(file.type || ''),
+    size: Number(file.size || 0),
+    text: String(file.text || '').slice(0, 12000)
   }));
-}
 
-function convertTools(req, legacyTools = [], mcpServers = []) {
-  const tools = [];
-  const wantsWeb = legacyTools.some(t => String(t?.type || '').includes('web_search') || t?.name === 'web_search');
-  if (wantsWeb) tools.push({ type: 'web_search' });
-
-  for (const srv of mcpServers) {
-    if (!srv) continue;
-    const label = String(srv.name || srv.server_label || srv.id || 'mcp').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const connectorId = connectorForServer(srv);
-    const tokenInfo = getOAuthTokenWithMeta(req, label, connectorId);
-
-    if (connectorId) {
-      const provider = providerForConnector(connectorId);
-      if (!tokenInfo.value) {
-        throw Object.assign(new Error(`OAuth requerido para ${label}. Abre /api/oauth/start/${provider}?target=${encodeURIComponent(label)} y autoriza la cuenta.`), { status: 401, oauth_provider: provider, oauth_target: label });
-      }
-      tools.push({
-        type: 'mcp',
-        server_label: label,
-        connector_id: connectorId,
-        authorization: tokenInfo.value.startsWith('Bearer ') ? tokenInfo.value : `Bearer ${tokenInfo.value}`,
-        require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
-      });
-      continue;
-    }
-
-    const serverUrl = srv.url || srv.server_url;
-    if (typeof serverUrl !== 'string' || !serverUrl.startsWith('https://')) continue;
-    const tool = { type: 'mcp', server_label: label, server_url: serverUrl, require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never' };
-    if (tokenInfo.value) tool.authorization = tokenInfo.value.startsWith('Bearer ') ? tokenInfo.value : `Bearer ${tokenInfo.value}`;
-    tools.push(tool);
-  }
-  return tools;
-}
-
-function toResponsesPayload(req, body) {
-  const input = normalizeMessages(body.messages || []);
-  if (input.length === 0 && typeof body.input === 'string') input.push({ role: 'user', content: body.input });
-  const payload = {
+  return {
     model: body.model || DEFAULT_MODEL,
-    instructions: body.system || undefined,
-    input,
-    max_output_tokens: Number(body.max_tokens || body.max_output_tokens || 2000),
+    instructions: [
+      'Eres PsychApp, una herramienta de apoyo para reflexión psicológica estructurada.',
+      'No diagnostiques ni sustituyas evaluación clínica. Señala incertidumbre, límites y riesgos.',
+      'Usa los datos conectados, archivos y scraping público como evidencia; separa observación, hipótesis y acciones prudentes.',
+      'Devuelve el resultado en español con secciones: lectura global, patrones, señales temporales, hipótesis, preguntas útiles, próximos pasos y límites.'
+    ].join('\n'),
+    input: [
+      {
+        role: 'user',
+        content: JSON.stringify({
+          task: 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados y perfiles públicos scrapeados.',
+          notes,
+          selected_connectors: selected,
+          files: fileSummaries,
+          scraped_profiles: scraped
+        }, null, 2)
+      }
+    ],
+    tools: getMcpTools(req, body),
+    max_output_tokens: positiveInt(body.max_output_tokens, 2500),
     store: process.env.OPENAI_STORE === 'true'
   };
-  const tools = convertTools(req, body.tools || [], body.mcp_servers || []);
-  if (tools.length) payload.tools = tools;
-  if (body.temperature != null) payload.temperature = body.temperature;
-  if (body.reasoning) payload.reasoning = body.reasoning;
-  return payload;
 }
 
-function asAnthropicCompatible(openaiData) {
-  return {
-    content: [{ type: 'text', text: extractOutputText(openaiData) }],
-    provider: 'openai',
-    raw_id: openaiData?.id || null,
-    raw_status: openaiData?.status || null
-  };
-}
+async function handleAnalyze(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const profileUrls = normalizeUrlList(body.profile_urls || []);
+    const scraped = [];
+    for (const url of profileUrls.slice(0, 12)) scraped.push(await scrapeOne(url));
 
-function maybeMock(body) {
-  if (process.env.MOCK_AI !== 'true') return null;
-  return { content: [{ type: 'text', text: JSON.stringify({ ok: true, demo: true, message: 'MOCK_AI activo' }) }] };
+    const payload = buildAnalysisPrompt(req, body, scraped);
+    if (!payload.tools?.length) delete payload.tools;
+    const openai = await callOpenAI(req, payload);
+    const output_text = extractOutputText(openai);
+    const save = await saveAnalysisRun({ req, body, scraped, openai, output_text });
+
+    return sendJson(res, 200, {
+      ok: true,
+      provider: 'openai',
+      model: payload.model,
+      output_text,
+      scraped,
+      saved: save,
+      raw_id: openai.id || null,
+      raw_status: openai.status || null
+    });
+  } catch (error) {
+    return sendJson(res, error.status || 500, {
+      ok: false,
+      error: {
+        message: error.message || 'Analysis error',
+        oauth_provider: error.oauth_provider,
+        oauth_url: error.oauth_url,
+        diagnostic: error.diagnostic,
+        upstream: error.upstream
+      }
+    });
+  }
 }
 
 async function handleMessages(req, res) {
   try {
-    const raw = await readBody(req);
-    const body = JSON.parse(raw || '{}');
-    const mock = maybeMock(body);
-    if (mock) return sendJson(res, 200, mock);
-
-    const keyInfo = getOpenAIKeyWithMeta();
-    const key = keyInfo.value;
-    if (!key) {
-      return sendJson(res, 500, { error: { message: `Falta clave OpenAI. Crea un Render Secret File llamado ${OPENAI_SECRET_FILE_NAME}. En Render se monta como ${OPENAI_SECRET_FILE_PATH}.`, diagnostic: publicDiagnostics(req) } });
-    }
-
-    const payload = toResponsesPayload(req, body);
-    const upstream = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify(payload)
+    const body = await readJsonBody(req);
+    const input = Array.isArray(body.messages)
+      ? body.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }))
+      : [{ role: 'user', content: String(body.input || body.prompt || '') }];
+    const payload = {
+      model: body.model || DEFAULT_MODEL,
+      instructions: body.system || undefined,
+      input,
+      tools: getMcpTools(req, body),
+      max_output_tokens: positiveInt(body.max_output_tokens || body.max_tokens, 1800),
+      store: process.env.OPENAI_STORE === 'true'
+    };
+    if (!payload.tools.length) delete payload.tools;
+    const openai = await callOpenAI(req, payload);
+    return sendJson(res, 200, {
+      content: [{ type: 'text', text: extractOutputText(openai) }],
+      provider: 'openai',
+      raw_id: openai.id || null,
+      raw_status: openai.status || null
     });
-    const text = await upstream.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = null; }
-    if (!upstream.ok) return sendJson(res, upstream.status, data || { error: { message: text || `HTTP ${upstream.status}` } });
-    return sendJson(res, 200, asAnthropicCompatible(data));
-  } catch (err) {
-    const payload = { error: { message: err.message || 'Error interno' } };
-    if (err.oauth_provider) {
-      payload.error.oauth_provider = err.oauth_provider;
-      payload.error.oauth_url = `/api/oauth/start/${err.oauth_provider}?target=${encodeURIComponent(err.oauth_target || err.oauth_provider)}`;
-    }
-    return sendJson(res, err.status || 500, payload);
+  } catch (error) {
+    return sendJson(res, error.status || 500, {
+      error: {
+        message: error.message || 'OpenAI proxy error',
+        oauth_provider: error.oauth_provider,
+        oauth_url: error.oauth_url,
+        diagnostic: error.diagnostic,
+        upstream: error.upstream
+      }
+    });
   }
 }
 
-function tokenPresenceSummary(req) {
-  const labels = [
-    ['gmail', 'connector_gmail'],
-    ['drive', 'connector_googledrive'],
-    ['google_calendar', 'connector_googlecalendar'],
-    ['m365', 'connector_outlookemail'],
-    ['outlook_calendar', 'connector_outlookcalendar'],
-    ['teams', 'connector_microsoftteams'],
-    ['sharepoint', 'connector_sharepoint'],
-    ['onedrive', 'connector_sharepoint'],
-    ['dropbox', 'connector_dropbox']
-  ];
-  return Object.fromEntries(labels.map(([label, connector]) => {
-    const info = getOAuthTokenWithMeta(req, label, connector);
-    return [label, { present: Boolean(info.value), source: info.source ? info.source.replace(/:.+$/, ':***') : '' }];
-  }));
+async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
+  const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const serviceKey = normalizeSecret(process.env.SUPABASE_SERVICE_ROLE_KEY, ['SUPABASE_SERVICE_ROLE_KEY']);
+  if (!supabaseUrl || !serviceKey) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
+
+  const row = {
+    app_path: APP_BASE_PATH || '/',
+    request_meta: {
+      notes_present: Boolean(body.notes),
+      connector_ids: Array.isArray(body.connector_ids) ? body.connector_ids : [],
+      file_count: Array.isArray(body.files) ? body.files.length : 0,
+      profile_urls: normalizeUrlList(body.profile_urls || [])
+    },
+    scraped,
+    result: {
+      output_text,
+      openai_id: openai.id || null,
+      openai_status: openai.status || null,
+      model: body.model || DEFAULT_MODEL
+    },
+    user_agent: req.headers['user-agent'] || ''
+  };
+
+  const response = await fetch(`${supabaseUrl}/rest/v1/psychapp_runs`, {
+    method: 'POST',
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify(row)
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    return { ok: false, skipped: false, status: response.status, message: text.slice(0, 400) };
+  }
+  return { ok: true, skipped: false };
 }
 
 function publicDiagnostics(req = null) {
   const keyInfo = getOpenAIKeyWithMeta();
+  const store = req ? readOAuthStore(req) : { providers: {} };
   return {
     ok: true,
+    app_base_path: APP_BASE_PATH || '/',
+    public_base_url: req ? absoluteBaseUrl(req) : process.env.PUBLIC_BASE_URL || '',
     provider: 'openai',
-    mock: process.env.MOCK_AI === 'true',
-    node: process.version,
-    port: PORT,
     openai: {
       key_present: Boolean(keyInfo.value),
-      key_source: keyInfo.source ? keyInfo.source.replace(/:.+$/, ':***') : '',
-      expected_secret_file_name: OPENAI_SECRET_FILE_NAME,
-      expected_secret_file_path: OPENAI_SECRET_FILE_PATH,
+      key_source: safeSource(keyInfo.source),
       model: DEFAULT_MODEL,
       url: OPENAI_URL,
       store: process.env.OPENAI_STORE === 'true'
     },
-    secrets: { dir: SECRET_DIR, dir_exists: fs.existsSync(SECRET_DIR), files: safeSecretFiles() },
     oauth: {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
       microsoft_tenant: MICROSOFT_TENANT,
-      status_url: '/api/oauth/status',
-      start_google_url: '/api/oauth/start/google',
-      start_microsoft_url: '/api/oauth/start/microsoft',
-      callback_json_hint: '/api/oauth/callback/microsoft?json=1',
+      providers: {
+        google: publicTokenMeta(store.providers?.google),
+        microsoft: publicTokenMeta(store.providers?.microsoft)
+      },
       config: req ? publicOAuthConfig(req) : {}
     },
-    oauth_tokens: req ? tokenPresenceSummary(req) : {},
-    notes: [
-      'Este endpoint no muestra valores secretos.',
-      'OAuth callbacks accept GET and POST. Add ?json=1 or Accept: application/json to force JSON responses.',
-      'Microsoft personal accounts use MICROSOFT_TENANT=consumers and personal-safe Graph scopes by default.',
-      'Do not configure PsychApp as an OAuth/OIDC provider. PsychApp is the client; Microsoft is the provider.'
-    ]
+    mcp_connectors: CONNECTORS,
+    scraper: {
+      timeout_ms: SCRAPE_TIMEOUT_MS,
+      max_bytes: SCRAPE_MAX_BYTES,
+      blocks_private_hosts: true
+    },
+    supabase: {
+      configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+    },
+    node: process.version
   };
 }
 
-function serveStatic(req, res) {
-  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
-  if (pathname.startsWith('/api/')) return sendJson(res, 404, { error: { message: `API route not found: ${pathname}` } });
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+}
 
-  let urlPath = decodeURIComponent(pathname);
+function stripBase(pathname) {
+  if (APP_BASE_PATH && (pathname === APP_BASE_PATH || pathname.startsWith(`${APP_BASE_PATH}/`))) {
+    const stripped = pathname.slice(APP_BASE_PATH.length) || '/';
+    return stripped.startsWith('/') ? stripped : `/${stripped}`;
+  }
+  return pathname;
+}
+
+function routePath(req) {
+  const url = new URL(req.url, `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
+  return { url, pathname: stripBase(url.pathname) };
+}
+
+function serveStatic(req, res, originalPathname, strippedPathname) {
+  if (!APP_BASE_PATH && originalPathname === '/') return serveFile(res, path.join(DIST, 'index.html'));
+  if (APP_BASE_PATH && originalPathname === '/') return redirect(res, `${APP_BASE_PATH}/`);
+
+  let urlPath = decodeURIComponent(strippedPathname);
   if (urlPath === '/') urlPath = '/index.html';
-  const filePath = path.normalize(path.join(DIST, urlPath));
-  if (!filePath.startsWith(DIST)) return sendJson(res, 403, { error: { message: 'Forbidden' } });
-  const target = fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? filePath : path.join(DIST, 'index.html');
-  fs.readFile(target, (err, data) => {
+  const requested = path.resolve(path.join(DIST, urlPath));
+  const distRoot = path.resolve(DIST);
+  if (!requested.startsWith(distRoot)) return sendJson(res, 403, { error: { message: 'Forbidden' } });
+  const filePath = fs.existsSync(requested) && fs.statSync(requested).isFile() ? requested : path.join(DIST, 'index.html');
+  return serveFile(res, filePath);
+}
+
+function serveFile(res, filePath) {
+  fs.readFile(filePath, (err, data) => {
     if (err) return sendJson(res, 404, { error: { message: 'No existe dist/. Ejecuta npm run build primero.' } });
-    const cache = target.endsWith('index.html') || target.endsWith('service-worker.js') || target.endsWith('manifest.webmanifest') ? 'no-cache' : 'public, max-age=31536000, immutable';
-    res.writeHead(200, { 'Content-Type': mime(target), 'Cache-Control': cache });
+    const cache = filePath.endsWith('index.html') || filePath.endsWith('manifest.webmanifest')
+      ? 'no-cache'
+      : 'public, max-age=31536000, immutable';
+    res.writeHead(200, { 'Content-Type': mime(filePath), 'Cache-Control': cache });
     res.end(data);
   });
 }
 
-function mime(file) {
-  const ext = path.extname(file);
+function mime(filePath) {
+  const ext = path.extname(filePath);
   return ({
     '.html': 'text/html; charset=utf-8',
     '.js': 'application/javascript; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json; charset=utf-8',
     '.webmanifest': 'application/manifest+json; charset=utf-8',
-    '.svg': 'image/svg+xml',
+    '.svg': 'image/svg+xml; charset=utf-8',
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.woff': 'font/woff',
-    '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf'
+    '.woff2': 'font/woff2'
   }[ext]) || 'application/octet-stream';
-}
-
-function methodNotAllowed(res, allowed) {
-  return sendJson(res, 405, { error: { message: `Method not allowed. Use: ${allowed}` } }, { Allow: allowed });
 }
 
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
-  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
-  if (pathname === '/api/health') return sendJson(res, 200, publicDiagnostics(req));
-  if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
+  const { url, pathname } = routePath(req);
+
+  if (pathname === '/api/health' || pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
   if (pathname === '/api/oauth/status') return handleOAuthStatus(req, res);
   if (pathname === '/api/oauth/logout') return req.method === 'POST' ? handleOAuthLogout(req, res) : methodNotAllowed(res, 'POST');
   if (pathname.startsWith('/api/oauth/logout/')) return req.method === 'POST' ? handleOAuthLogout(req, res, pathname.split('/').pop()) : methodNotAllowed(res, 'POST');
-  if (pathname.startsWith('/api/oauth/start/')) return req.method === 'GET' ? handleOAuthStart(req, res, pathname.split('/').pop()).catch(err => sendJson(res, err.status || 500, { error: { message: err.message } })) : methodNotAllowed(res, 'GET');
-  if (pathname.startsWith('/api/oauth/callback/')) {
-    if (req.method !== 'GET' && req.method !== 'POST') return methodNotAllowed(res, 'GET, POST');
-    return handleOAuthCallback(req, res, pathname.split('/').pop()).catch(err => {
-      const payload = { ok: false, error: { message: err.message || 'OAuth callback error' } };
-      return wantsJson(req) ? sendJson(res, err.status || 500, payload) : sendHtml(res, err.status || 500, oauthResultHtml('OAuth error', escapeHtml(err.message), '/'));
-    });
-  }
+  if (pathname.startsWith('/api/oauth/start/')) return req.method === 'GET'
+    ? handleOAuthStart(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
+    : methodNotAllowed(res, 'GET');
+  if (pathname.startsWith('/api/oauth/callback/')) return req.method === 'GET'
+    ? handleOAuthCallback(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
+    : methodNotAllowed(res, 'GET');
+  if (pathname === '/api/scrape') return req.method === 'POST' ? handleScrape(req, res) : methodNotAllowed(res, 'POST');
+  if (pathname === '/api/analyze') return req.method === 'POST' ? handleAnalyze(req, res) : methodNotAllowed(res, 'POST');
   if (pathname === '/api/messages') return req.method === 'POST' ? handleMessages(req, res) : methodNotAllowed(res, 'POST');
-  return serveStatic(req, res);
+  if (pathname.startsWith('/api/')) return sendJson(res, 404, { error: { message: `API route not found: ${pathname}` } });
+
+  return serveStatic(req, res, url.pathname, pathname);
 });
 
-server.on('error', err => {
-  console.error('[startup] Server failed to bind:', err);
+server.on('error', error => {
+  console.error('[startup] PsychApp failed to bind:', error);
   process.exit(1);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[startup] Psyche Deep running on http://0.0.0.0:${PORT}`);
-  console.log(`[startup] OpenAI secret file expected at ${OPENAI_SECRET_FILE_PATH}`);
-  console.log(`[startup] Microsoft tenant: ${MICROSOFT_TENANT}`);
+  console.log(`[startup] PsychApp running on http://0.0.0.0:${PORT}${APP_BASE_PATH || '/'}`);
+  console.log(`[startup] OpenAI model: ${DEFAULT_MODEL}`);
 });
-
