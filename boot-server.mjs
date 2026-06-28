@@ -40,7 +40,7 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
         recoverable_by_retry: false,
         next_steps: [
           'Revisa Usage y Limits/Billing del proyecto OpenAI que corresponde a OPENAI_API_SECRET u OPENAI_API_KEY.',
-          'Aumenta el monthly budget, compra créditos o cambia a una API key de un proyecto con saldo.',
+          'Aumenta el monthly budget, compra créditos o cambia a otra clave/proyecto con presupuesto disponible.',
           'Después redeploy/restart en Render y prueba /api/health para confirmar key_present=true y el modelo activo.',
           'Para probar la interfaz sin gastar créditos, activa temporalmente MOCK_AI=true.'
         ],
@@ -103,19 +103,102 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
     }
   };
 }
+
+function oauthResponseHeaders(req) {
+  return req?.__psychapp_oauth_set_cookie ? { 'Set-Cookie': req.__psychapp_oauth_set_cookie } : {};
+}
 `;
 
   if (!code.includes('function openAIErrorPayload(')) {
     const marker = `function maybeMock(body) {\n  if (process.env.MOCK_AI !== 'true') return null;\n  return { content: [{ type: 'text', text: JSON.stringify({ ok: true, demo: true, message: 'MOCK_AI activo' }) }] };\n}\n`;
     if (!code.includes(marker)) throw new Error('Cannot find maybeMock marker in server.mjs');
     code = code.replace(marker, `${marker}${helper}`);
+  } else if (!code.includes('function oauthResponseHeaders(')) {
+    code = code.replace('function openAIErrorPayload(', `${helper}\nfunction openAIErrorPayload(`);
+  }
+
+  const oldTokenMetaBlock = `function getOAuthTokenWithMeta(req, label, connectorId = '') {\n  const provider = providerForConnector(connectorId);\n  const accessToken = provider ? getProviderToken(req, provider) : '';\n  if (accessToken) return { value: accessToken, source: \`oauth-cookie:\${provider}\` };\n  if (process.env.ALLOW_STATIC_OAUTH_TOKENS === 'true') {\n    const info = findSecret(tokenNamesFor(label, connectorId));\n    if (info.value) return info;\n  }\n  return { value: '', source: '' };\n}\n`;
+
+  const refreshedTokenMetaBlock = `${oldTokenMetaBlock}
+async function refreshProviderAccessToken(req, providerName, store) {
+  const token = store?.providers?.[providerName];
+  if (!token?.refresh_token) return null;
+
+  const { provider, clientId, clientSecret } = oauthProviderConfig(providerName);
+  if (!provider || !clientId) return null;
+
+  const tokenParams = new URLSearchParams();
+  tokenParams.set('client_id', clientId);
+  if (clientSecret) tokenParams.set('client_secret', clientSecret);
+  tokenParams.set('grant_type', 'refresh_token');
+  tokenParams.set('refresh_token', token.refresh_token);
+
+  let tokenResponse;
+  try {
+    tokenResponse = await fetch(provider.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+      body: tokenParams.toString(),
+      redirect: 'manual'
+    });
+  } catch {
+    return null;
+  }
+
+  if (!tokenResponse.ok) return null;
+
+  let tokenJson;
+  try { tokenJson = await tokenResponse.json(); } catch { tokenJson = null; }
+  if (!tokenJson?.access_token) return null;
+
+  const expiresIn = Number(tokenJson.expires_in || 3600);
+  store.providers[providerName] = {
+    ...token,
+    access_token: tokenJson.access_token,
+    refresh_token: tokenJson.refresh_token || token.refresh_token,
+    expires_at: Date.now() + expiresIn * 1000,
+    scope: tokenJson.scope || token.scope || provider.scopes.join(' '),
+    token_type: tokenJson.token_type || token.token_type || 'Bearer',
+    updated_at: Date.now(),
+    refreshed_at: Date.now()
+  };
+
+  req.__psychapp_oauth_set_cookie = writeOAuthStore(req, store);
+  return store.providers[providerName];
+}
+
+async function getOAuthTokenWithMetaForConnector(req, label, connectorId = '') {
+  const provider = providerForConnector(connectorId);
+  if (provider) {
+    const store = readOAuthStore(req);
+    const token = store.providers?.[provider];
+    if (token?.access_token && (!token.expires_at || Date.now() <= token.expires_at - 60000)) {
+      return { value: token.access_token, source: \`oauth-cookie:\${provider}\` };
+    }
+    const refreshed = await refreshProviderAccessToken(req, provider, store);
+    if (refreshed?.access_token) return { value: refreshed.access_token, source: \`oauth-cookie-refreshed:\${provider}\` };
+  }
+
+  if (process.env.ALLOW_STATIC_OAUTH_TOKENS === 'true') {
+    const info = findSecret(tokenNamesFor(label, connectorId));
+    if (info.value) return info;
+  }
+  return { value: '', source: '' };
+}
+`;
+
+  if (!code.includes('async function getOAuthTokenWithMetaForConnector(')) {
+    if (!code.includes(oldTokenMetaBlock)) throw new Error('Cannot find getOAuthTokenWithMeta block in server.mjs');
+    code = code.replace(oldTokenMetaBlock, refreshedTokenMetaBlock);
   }
 
   const oldLine = "if (!upstream.ok) return sendJson(res, upstream.status, data || { error: { message: text || `HTTP ${upstream.status}` } });";
-  const newLine = "if (!upstream.ok) return sendJson(res, upstream.status, openAIErrorPayload(upstream.status, data, text, payload));";
+  const newLine = "if (!upstream.ok) return sendJson(res, upstream.status, openAIErrorPayload(upstream.status, data, text, payload), oauthResponseHeaders(req));";
+  const alreadyPatchedOldErrorLine = "if (!upstream.ok) return sendJson(res, upstream.status, openAIErrorPayload(upstream.status, data, text, payload));";
   if (!code.includes(newLine)) {
-    if (!code.includes(oldLine)) throw new Error('Cannot find OpenAI upstream error passthrough line in server.mjs');
-    code = code.replace(oldLine, newLine);
+    if (code.includes(alreadyPatchedOldErrorLine)) code = code.replace(alreadyPatchedOldErrorLine, newLine);
+    else if (code.includes(oldLine)) code = code.replace(oldLine, newLine);
+    else throw new Error('Cannot find OpenAI upstream error passthrough line in server.mjs');
   }
 
   const optionalWebSearchLine = "if (tools.length) payload.tools = tools;";
@@ -126,6 +209,22 @@ function openAIErrorPayload(status, data, text = '', requestPayload = {}) {
   if (!code.includes(requiredWebSearchBlock)) {
     if (!code.includes(optionalWebSearchLine)) throw new Error('Cannot find web search tools assignment in server.mjs');
     code = code.replace(optionalWebSearchLine, requiredWebSearchBlock);
+  }
+
+  const asyncPatches = [
+    ["function convertTools(req, legacyTools = [], mcpServers = []) {", "async function convertTools(req, legacyTools = [], mcpServers = []) {"],
+    ["const tokenInfo = getOAuthTokenWithMeta(req, label, connectorId);", "const tokenInfo = await getOAuthTokenWithMetaForConnector(req, label, connectorId);"],
+    ["function toResponsesPayload(req, body) {", "async function toResponsesPayload(req, body) {"],
+    ["const tools = convertTools(req, body.tools || [], body.mcp_servers || []);", "const tools = await convertTools(req, body.tools || [], body.mcp_servers || []);"],
+    ["const payload = toResponsesPayload(req, body);", "const payload = await toResponsesPayload(req, body);"],
+    ["return sendJson(res, 200, asAnthropicCompatible(data));", "return sendJson(res, 200, asAnthropicCompatible(data), oauthResponseHeaders(req));"]
+  ];
+
+  for (const [before, after] of asyncPatches) {
+    if (!code.includes(after)) {
+      if (!code.includes(before)) throw new Error(`Cannot find patch target in server.mjs: ${before}`);
+      code = code.replace(before, after);
+    }
   }
 
   return code;
