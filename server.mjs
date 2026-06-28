@@ -21,6 +21,8 @@ const SCRAPE_TIMEOUT_MS = positiveInt(process.env.SCRAPE_TIMEOUT_MS, 12000);
 const SCRAPE_MAX_BYTES = positiveInt(process.env.SCRAPE_MAX_BYTES, 1600 * 1024);
 const SCRAPE_MAX_LINKS = positiveInt(process.env.SCRAPE_MAX_LINKS, 80);
 const SCRAPE_MAX_MEDIA = positiveInt(process.env.SCRAPE_MAX_MEDIA, 60);
+const OPENAI_TIMEOUT_MS = positiveInt(process.env.OPENAI_TIMEOUT_MS, 90000);
+const SUPABASE_TIMEOUT_MS = positiveInt(process.env.SUPABASE_TIMEOUT_MS, 3500);
 const MAX_UPLOADED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_UPLOADED_IMAGES_FOR_VISION, 8);
 const MAX_SCRAPED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_SCRAPED_IMAGES_FOR_VISION, 8);
 const MAX_UPLOADED_DOCUMENTS_FOR_MODEL = positiveInt(process.env.MAX_UPLOADED_DOCUMENTS_FOR_MODEL, 8);
@@ -265,6 +267,23 @@ function supabaseKeyKind(source = '') {
 
 function safeSource(source) {
   return source ? source.replace(/:.+$/, ':***') : '';
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const requestOptions = { ...options };
+  if (!requestOptions.signal) requestOptions.signal = controller.signal;
+  try {
+    return await fetch(url, requestOptions);
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw Object.assign(new Error(`Tiempo de espera agotado (${timeoutMs} ms).`), { status: 504 });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function sendJson(res, status, payload, extraHeaders = {}) {
@@ -524,6 +543,12 @@ async function handleOAuthStart(req, res, providerName) {
   const { provider, clientId } = oauthProviderConfig(providerName);
   if (!provider) return sendJson(res, 404, { error: { message: `Proveedor OAuth no soportado: ${providerName}` } });
   if (!clientId) {
+    trackPsychappEvent(req, 'psychapp.oauth.error', {
+      route: `/api/oauth/start/${providerName}`,
+      provider: providerName,
+      reason: 'missing_client_id',
+      required: provider.clientIdNames
+    });
     return sendJson(res, 500, {
       error: {
         message: `Falta ${provider.label} OAuth client id.`,
@@ -551,6 +576,14 @@ async function handleOAuthStart(req, res, providerName) {
   auth.searchParams.set('code_challenge_method', 'S256');
   for (const [key, value] of Object.entries(provider.authExtras || {})) auth.searchParams.set(key, value);
 
+  trackPsychappEvent(req, 'psychapp.oauth.start', {
+    route: `/api/oauth/start/${providerName}`,
+    provider: providerName,
+    scopes: provider.scopes,
+    client_id_present: true,
+    client_secret_present: Boolean(oauthProviderConfig(providerName).clientSecret)
+  });
+
   return redirect(res, auth.toString(), {
     'Set-Cookie': cookieString(STATE_COOKIE, signStatePayload(statePayload), req, { maxAge: 600 })
   });
@@ -564,6 +597,12 @@ async function handleOAuthCallback(req, res, providerName) {
   const params = await callbackParams(req, reqUrl);
   const error = params.get('error');
   if (error) {
+    trackPsychappEvent(req, 'psychapp.oauth.error', {
+      route: `/api/oauth/callback/${providerName}`,
+      provider: providerName,
+      reason: error,
+      message: params.get('error_description') || error
+    });
     return oauthReply(req, res, 400, {
       ok: false,
       provider: providerName,
@@ -589,6 +628,14 @@ async function handleOAuthCallback(req, res, providerName) {
 
   const statePayload = verifyStatePayload(parseCookies(req)[STATE_COOKIE]);
   if (!code || !state || !statePayload || statePayload.state !== state || statePayload.provider !== providerName) {
+    trackPsychappEvent(req, 'psychapp.oauth.error', {
+      route: `/api/oauth/callback/${providerName}`,
+      provider: providerName,
+      reason: 'invalid_state',
+      code_present: Boolean(code),
+      state_present: Boolean(state),
+      state_cookie_present: Boolean(statePayload)
+    });
     return oauthReply(req, res, 400, {
       ok: false,
       provider: providerName,
@@ -596,6 +643,11 @@ async function handleOAuthCallback(req, res, providerName) {
     }, 'OAuth inválido', 'Reinicia la conexión desde la app.', APP_BASE_PATH || '/');
   }
   if (Date.now() - Number(statePayload.created_at || 0) > 10 * 60 * 1000) {
+    trackPsychappEvent(req, 'psychapp.oauth.error', {
+      route: `/api/oauth/callback/${providerName}`,
+      provider: providerName,
+      reason: 'expired_state'
+    });
     return oauthReply(req, res, 400, {
       ok: false,
       provider: providerName,
@@ -626,6 +678,13 @@ async function handleOAuthCallback(req, res, providerName) {
   }
 
   if (!tokenResponse.ok || !tokenJson?.access_token) {
+    trackPsychappEvent(req, 'psychapp.oauth.error', {
+      route: `/api/oauth/callback/${providerName}`,
+      provider: providerName,
+      reason: 'token_exchange_failed',
+      status: tokenResponse.status,
+      message: tokenJson?.error_description || tokenJson?.error || `HTTP ${tokenResponse.status}`
+    });
     return oauthReply(req, res, tokenResponse.ok ? 502 : tokenResponse.status, {
       ok: false,
       provider: providerName,
@@ -646,6 +705,14 @@ async function handleOAuthCallback(req, res, providerName) {
     token_type: tokenJson.token_type || 'Bearer',
     updated_at: Date.now()
   };
+
+  trackPsychappEvent(req, 'psychapp.oauth.connected', {
+    route: `/api/oauth/callback/${providerName}`,
+    provider: providerName,
+    scopes: String(store.providers[providerName].scope || '').split(/\s+/).filter(Boolean),
+    expires_in_seconds: expiresIn,
+    connector_scope_status: connectorScopeStatus(store.providers[providerName].scope || '', providerName)
+  });
 
   const headers = [
     writeOAuthStore(req, store),
@@ -1154,7 +1221,7 @@ async function refreshProviderAccessToken(providerName, store) {
     delete store.providers?.[providerName];
     return {
       accessToken: '',
-      refreshed: false,
+      refreshed: true,
       reason: data?.error_description || data?.error || `refresh_http_${response.status}`
     };
   }
@@ -1204,7 +1271,8 @@ async function getMcpTools(req, body) {
         oauth_provider: connector.provider,
         oauth_url: oauthStartUrl(req, connector.provider),
         oauth_reason: tokenState.reason,
-        oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider)
+        oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider),
+        refreshed_cookie: refreshed ? writeOAuthStore(req, store) : ''
       });
     }
     const scopeText = store.providers?.[connector.provider]?.scope || '';
@@ -1282,14 +1350,14 @@ async function callOpenAI(req, payload) {
     });
   }
 
-  const response = await fetch(OPENAI_URL, {
+  const response = await fetchWithTimeout(OPENAI_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${keyInfo.value}`
     },
     body: JSON.stringify(payload)
-  });
+  }, OPENAI_TIMEOUT_MS);
   const text = await response.text();
   let data = null;
   try {
@@ -1510,13 +1578,146 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
   };
 }
 
+function safeMetadataValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === 'string') return value.length > 700 ? `${value.slice(0, 700)}...` : value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 50).map(item => safeMetadataValue(item, depth + 1));
+  if (typeof value !== 'object') return String(value);
+  if (depth >= 4) return '[truncated]';
+
+  const out = {};
+  for (const [key, item] of Object.entries(value).slice(0, 60)) {
+    if (typeof item === 'function' || typeof item === 'undefined') continue;
+    out[key] = safeMetadataValue(item, depth + 1);
+  }
+  return out;
+}
+
+function analysisRequestMeta(body = {}, scraped = []) {
+  const files = Array.isArray(body.files) ? body.files : [];
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids.filter(id => CONNECTORS[id]) : [];
+  const profileUrls = normalizeUrlList(body.profile_urls || []);
+  const centralDocument = body.central_document && typeof body.central_document === 'object' ? body.central_document : null;
+  const scrapedImages = collectScrapedImages(Array.isArray(scraped) ? scraped : []);
+  return {
+    analysis_mode: String(body.analysis_mode || 'case_formulation'),
+    connector_ids: selected,
+    connector_count: selected.length,
+    notes_present: Boolean(String(body.notes || '').trim()),
+    notes_chars: String(body.notes || '').length,
+    central_text_present: Boolean(String(body.central_text || body.case_text || '').trim()),
+    central_text_chars: String(body.central_text || body.case_text || '').length,
+    central_document_present: Boolean(centralDocument),
+    central_document_type: centralDocument ? String(centralDocument.type || '') : '',
+    central_document_size: centralDocument ? Number(centralDocument.size || 0) : 0,
+    file_count: files.length,
+    image_file_count: files.filter(isImageFile).length,
+    document_file_count: files.filter(isDocumentFile).length,
+    text_file_count: files.filter(file => !isImageFile(file) && !isDocumentFile(file)).length,
+    profile_url_count: profileUrls.length,
+    profile_urls: profileUrls.slice(0, 12),
+    scraped_count: Array.isArray(scraped) ? scraped.length : 0,
+    scraped_ok_count: Array.isArray(scraped) ? scraped.filter(item => item?.ok).length : 0,
+    scraped_image_count: scrapedImages.length
+  };
+}
+
+function clientIdHash(req) {
+  if (!req) return '';
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const basis = [
+    forwarded,
+    req.socket?.remoteAddress || '',
+    req.headers['user-agent'] || '',
+    process.env.PUBLIC_BASE_URL || APP_BASE_PATH || '/'
+  ].join('|');
+  if (!basis.replace(/\|/g, '').trim()) return '';
+  return crypto.createHash('sha256').update(basis).digest('hex').slice(0, 40);
+}
+
+async function supabaseInsert(table, row) {
+  const allowedTables = new Set(['psychapp_runs', 'psychapp_mcp_oauth_audit']);
+  if (!allowedTables.has(table)) return { ok: false, skipped: true, reason: 'Tabla Supabase no permitida' };
+
+  const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const supabaseKey = getSupabaseKeyWithMeta();
+  if (!supabaseUrl || !supabaseKey.value) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
+
+  const response = await fetchWithTimeout(`${supabaseUrl}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey.value,
+      Authorization: `Bearer ${supabaseKey.value}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify(row)
+  }, SUPABASE_TIMEOUT_MS);
+
+  if (!response.ok) {
+    const text = await response.text();
+    return { ok: false, skipped: false, status: response.status, message: text.slice(0, 400) };
+  }
+  return { ok: true, skipped: false };
+}
+
+async function logPsychappEvent(req, eventType, metadata = {}) {
+  try {
+    const safeMetadata = safeMetadataValue({
+      app_path: APP_BASE_PATH || '/',
+      ...metadata
+    }) || {};
+    const result = await supabaseInsert('psychapp_mcp_oauth_audit', {
+      event_type: eventType,
+      subject: String(safeMetadata.subject || safeMetadata.analysis_mode || APP_BASE_PATH || '/').slice(0, 180),
+      client_id_hash: clientIdHash(req),
+      tool_name: Array.isArray(safeMetadata.connector_ids) ? safeMetadata.connector_ids.join(',').slice(0, 180) : String(safeMetadata.tool_name || '').slice(0, 180),
+      resource: String(safeMetadata.resource || safeMetadata.route || APP_BASE_PATH || '/').slice(0, 300),
+      scopes: Array.isArray(safeMetadata.scopes) ? safeMetadata.scopes.map(String).slice(0, 40) : null,
+      metadata: safeMetadata
+    });
+    if (!result.ok && !result.skipped) {
+      console.warn('[audit] Supabase insert failed:', result.status || '', result.message || result.reason || '');
+    }
+    return result;
+  } catch (error) {
+    console.warn('[audit] Supabase insert error:', error?.message || error);
+    return { ok: false, skipped: false, message: error?.message || String(error) };
+  }
+}
+
+function trackPsychappEvent(req, eventType, metadata = {}) {
+  logPsychappEvent(req, eventType, metadata);
+}
+
+function analysisErrorMeta(error = {}) {
+  return {
+    status: Number(error.status || 500),
+    message: String(error.message || 'Analysis error').slice(0, 500),
+    oauth_provider: error.oauth_provider || '',
+    oauth_reason: error.oauth_reason || '',
+    oauth_diagnostic: error.diagnostic || null,
+    openai_error_code: error.upstream?.error?.code || '',
+    openai_error_type: error.upstream?.error?.type || '',
+    openai_status: error.upstream?.error?.status || error.upstream?.status || null
+  };
+}
+
 async function handleAnalyze(req, res) {
   let body = {};
+  const requestId = randomUrlSafe(10);
   try {
     body = await readJsonBody(req);
     const profileUrls = normalizeUrlList(body.profile_urls || []);
     const scraped = [];
     for (const url of profileUrls.slice(0, 12)) scraped.push(await scrapeOne(url));
+    await logPsychappEvent(req, 'psychapp.analyze.started', {
+      request_id: requestId,
+      route: '/api/analyze',
+      ...analysisRequestMeta(body, scraped)
+    });
 
     const mcp = await getMcpTools(req, body);
     const payload = buildAnalysisPrompt(req, body, scraped, mcp.tools);
@@ -1524,6 +1725,15 @@ async function handleAnalyze(req, res) {
     const openai = await callOpenAI(req, payload);
     const output_text = extractOutputText(openai);
     const save = await saveAnalysisRun({ req, body, scraped, openai, output_text });
+    await logPsychappEvent(req, 'psychapp.analyze.completed', {
+      request_id: requestId,
+      route: '/api/analyze',
+      ...analysisRequestMeta(body, scraped),
+      model: payload.model,
+      openai_id: openai.id || null,
+      openai_status: openai.status || null,
+      saved: save
+    });
 
     return sendJson(res, 200, {
       ok: true,
@@ -1537,6 +1747,14 @@ async function handleAnalyze(req, res) {
     }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
     const normalizedError = normalizeConnectorOAuthError(error, req, body);
+    await logPsychappEvent(req, 'psychapp.analyze.error', {
+      request_id: requestId,
+      route: '/api/analyze',
+      ...analysisRequestMeta(body, []),
+      ...analysisErrorMeta(normalizedError),
+      scopes: normalizedError.oauth_status?.required_scopes || []
+    });
+    const headers = normalizedError.refreshed_cookie ? { 'Set-Cookie': normalizedError.refreshed_cookie } : {};
     return sendJson(res, normalizedError.status || 500, {
       ok: false,
       error: {
@@ -1548,7 +1766,7 @@ async function handleAnalyze(req, res) {
         diagnostic: normalizedError.diagnostic,
         upstream: normalizedError.upstream
       }
-    });
+    }, headers);
   }
 }
 
@@ -1579,6 +1797,7 @@ async function handleMessages(req, res) {
     }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
     const normalizedError = normalizeConnectorOAuthError(error, req, body);
+    const headers = normalizedError.refreshed_cookie ? { 'Set-Cookie': normalizedError.refreshed_cookie } : {};
     return sendJson(res, normalizedError.status || 500, {
       error: {
         message: normalizedError.message || 'OpenAI proxy error',
@@ -1589,15 +1808,11 @@ async function handleMessages(req, res) {
         diagnostic: normalizedError.diagnostic,
         upstream: normalizedError.upstream
       }
-    });
+    }, headers);
   }
 }
 
 async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
-  const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
-  const supabaseKey = getSupabaseKeyWithMeta();
-  if (!supabaseUrl || !supabaseKey.value) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
-
   const row = {
     app_path: APP_BASE_PATH || '/',
     request_meta: {
@@ -1623,22 +1838,38 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
     user_agent: req.headers['user-agent'] || ''
   };
 
-  const response = await fetch(`${supabaseUrl}/rest/v1/psychapp_runs`, {
-    method: 'POST',
-    headers: {
-      apikey: supabaseKey.value,
-      Authorization: `Bearer ${supabaseKey.value}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal'
-    },
-    body: JSON.stringify(row)
-  });
+  return supabaseInsert('psychapp_runs', row);
+}
 
-  if (!response.ok) {
-    const text = await response.text();
-    return { ok: false, skipped: false, status: response.status, message: text.slice(0, 400) };
-  }
-  return { ok: true, skipped: false };
+function healthDiagnostics(req = null) {
+  const keyInfo = getOpenAIKeyWithMeta();
+  const supabaseKey = getSupabaseKeyWithMeta();
+  return {
+    ok: true,
+    status: 'ready',
+    app_base_path: APP_BASE_PATH || '/',
+    public_base_url: req ? absoluteBaseUrl(req) : process.env.PUBLIC_BASE_URL || '',
+    provider: 'openai',
+    openai: {
+      key_present: Boolean(keyInfo.value),
+      model: DEFAULT_MODEL,
+      timeout_ms: OPENAI_TIMEOUT_MS
+    },
+    oauth: {
+      cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
+      microsoft_tenant: MICROSOFT_TENANT,
+      config: req ? publicOAuthConfig(req) : {}
+    },
+    supabase: {
+      configured: Boolean(process.env.SUPABASE_URL && supabaseKey.value),
+      url_present: Boolean(process.env.SUPABASE_URL),
+      key_present: Boolean(supabaseKey.value),
+      key_kind: supabaseKeyKind(supabaseKey.source),
+      timeout_ms: SUPABASE_TIMEOUT_MS
+    },
+    node: process.version,
+    uptime_seconds: Math.round(process.uptime())
+  };
 }
 
 function publicDiagnostics(req = null) {
@@ -1758,7 +1989,8 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
   const { url, pathname } = routePath(req);
 
-  if (pathname === '/api/health' || pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
+  if (pathname === '/api/health') return sendJson(res, 200, healthDiagnostics(req));
+  if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
   if (pathname === '/api/oauth/status') return handleOAuthStatus(req, res);
   if (pathname === '/api/oauth/logout') return req.method === 'POST' ? handleOAuthLogout(req, res) : methodNotAllowed(res, 'POST');
   if (pathname.startsWith('/api/oauth/logout/')) return req.method === 'POST' ? handleOAuthLogout(req, res, pathname.split('/').pop()) : methodNotAllowed(res, 'POST');
