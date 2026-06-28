@@ -43,9 +43,9 @@ const GOOGLE_SCOPES = readScopes('GOOGLE_SCOPES', [
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/calendar.readonly'
+  'https://www.googleapis.com/auth/calendar.events'
 ]);
 
 const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
@@ -56,8 +56,21 @@ const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
   'User.Read',
   'Mail.Read',
   'Files.Read.All',
-  'Calendars.Read'
+  'Sites.Read.All',
+  'Calendars.Read',
+  'Chat.Read',
+  'ChannelMessage.Read.All'
 ]);
+
+const CONNECTOR_SCOPE_REQUIREMENTS = {
+  gmail: ['userinfo.email', 'userinfo.profile', 'gmail.modify'],
+  google_drive: ['userinfo.email', 'userinfo.profile', 'drive.readonly'],
+  google_calendar: ['userinfo.email', 'userinfo.profile', 'calendar.events'],
+  outlook: ['User.Read', 'Mail.Read'],
+  outlook_calendar: ['User.Read', 'Calendars.Read'],
+  sharepoint: ['User.Read', 'Files.Read.All', 'Sites.Read.All'],
+  teams: ['User.Read', 'Chat.Read', 'ChannelMessage.Read.All']
+};
 
 const OAUTH_PROVIDERS = {
   google: {
@@ -119,6 +132,67 @@ function readScopes(name, fallback) {
   if (!raw) return fallback;
   const scopes = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
   return scopes.length ? scopes : fallback;
+}
+
+function scopeAliases(scope) {
+  const value = String(scope || '').trim();
+  if (!value) return [];
+  const short = value
+    .replace(/^https:\/\/www\.googleapis\.com\/auth\//i, '')
+    .replace(/^https:\/\/graph\.microsoft\.com\//i, '')
+    .replace(/^https:\/\/www\.googleapis\.com\/auth\/userinfo\./i, 'userinfo.');
+  const aliases = new Set([value, short]);
+
+  if (value === 'email' || short === 'email') aliases.add('userinfo.email');
+  if (value === 'profile' || short === 'profile') aliases.add('userinfo.profile');
+  if (value === 'userinfo.email' || short === 'userinfo.email') {
+    aliases.add('email');
+    aliases.add('https://www.googleapis.com/auth/userinfo.email');
+  }
+  if (value === 'userinfo.profile' || short === 'userinfo.profile') {
+    aliases.add('profile');
+    aliases.add('https://www.googleapis.com/auth/userinfo.profile');
+  }
+  for (const googleScope of ['gmail.modify', 'gmail.readonly', 'drive.readonly', 'calendar.events', 'calendar.readonly']) {
+    if (value === googleScope || short === googleScope) aliases.add(`https://www.googleapis.com/auth/${googleScope}`);
+  }
+  for (const microsoftScope of ['User.Read', 'Mail.Read', 'Files.Read.All', 'Sites.Read.All', 'Calendars.Read', 'Chat.Read', 'ChannelMessage.Read.All']) {
+    if (value === microsoftScope || short === microsoftScope) aliases.add(`https://graph.microsoft.com/${microsoftScope}`);
+  }
+  return [...aliases].flatMap(alias => [alias, alias.toLowerCase()]);
+}
+
+function scopeSet(scopeText) {
+  const set = new Set();
+  for (const scope of String(scopeText || '').split(/\s+/).filter(Boolean)) {
+    for (const alias of scopeAliases(scope)) set.add(alias);
+  }
+  return set;
+}
+
+function missingScopes(scopeText, required = []) {
+  const available = scopeSet(scopeText);
+  return required.filter(scope => !scopeAliases(scope).some(alias => available.has(alias)));
+}
+
+function connectorScopeStatus(scopeText, providerName) {
+  return Object.fromEntries(Object.entries(CONNECTORS)
+    .filter(([, connector]) => connector.provider === providerName)
+    .map(([id, connector]) => {
+      const required = CONNECTOR_SCOPE_REQUIREMENTS[id] || [];
+      const missing = missingScopes(scopeText, required);
+      return [id, {
+        label: connector.label,
+        connector_id: connector.connector_id,
+        required_scopes: required,
+        missing_scopes: missing,
+        ready: missing.length === 0
+      }];
+    }));
+}
+
+function normalizeOAuthAccessToken(value) {
+  return String(value || '').replace(/^Bearer\s+/i, '').trim();
 }
 
 function normalizeSecret(value, keyNames = []) {
@@ -339,10 +413,12 @@ function writeOAuthStore(req, store) {
   });
 }
 
-function publicTokenMeta(token = {}) {
+function publicTokenMeta(token = {}, providerName = '') {
   if (!token?.access_token) return { connected: false };
   const expiresInSeconds = token.expires_at ? Math.max(0, Math.floor((token.expires_at - Date.now()) / 1000)) : null;
   const expired = expiresInSeconds != null && expiresInSeconds <= 30;
+  const provider = OAUTH_PROVIDERS[providerName];
+  const configuredScopes = provider?.scopes || [];
   return {
     connected: true,
     usable: !expired || Boolean(token.refresh_token),
@@ -350,7 +426,10 @@ function publicTokenMeta(token = {}) {
     can_refresh: Boolean(token.refresh_token),
     expires_at: token.expires_at || null,
     expires_in_seconds: expiresInSeconds,
-    scope: token.scope || ''
+    scope: token.scope || '',
+    required_scopes: configuredScopes,
+    missing_configured_scopes: missingScopes(token.scope || '', configuredScopes),
+    connector_scope_status: providerName ? connectorScopeStatus(token.scope || '', providerName) : {}
   };
 }
 
@@ -522,7 +601,7 @@ async function handleOAuthCallback(req, res, providerName) {
   const store = readOAuthStore(req);
   const expiresIn = Number(tokenJson.expires_in || 3600);
   store.providers[providerName] = {
-    access_token: tokenJson.access_token,
+    access_token: normalizeOAuthAccessToken(tokenJson.access_token),
     refresh_token: tokenJson.refresh_token || store.providers?.[providerName]?.refresh_token || '',
     expires_at: Date.now() + expiresIn * 1000,
     scope: tokenJson.scope || provider.scopes.join(' '),
@@ -581,8 +660,8 @@ function resultHtml(title, message, returnTo) {
 function handleOAuthStatus(req, res) {
   const store = readOAuthStore(req);
   const providerStatus = {
-    google: publicTokenMeta(store.providers?.google),
-    microsoft: publicTokenMeta(store.providers?.microsoft)
+    google: publicTokenMeta(store.providers?.google, 'google'),
+    microsoft: publicTokenMeta(store.providers?.microsoft, 'microsoft')
   };
   return sendJson(res, 200, {
     ok: true,
@@ -591,7 +670,10 @@ function handleOAuthStatus(req, res) {
       id,
       {
         ...connector,
-        connected: Boolean(providerStatus[connector.provider]?.connected)
+        connected: Boolean(providerStatus[connector.provider]?.connected),
+        ready: Boolean(providerStatus[connector.provider]?.connector_scope_status?.[id]?.ready),
+        required_scopes: CONNECTOR_SCOPE_REQUIREMENTS[id] || [],
+        missing_scopes: providerStatus[connector.provider]?.connector_scope_status?.[id]?.missing_scopes || []
       }
     ])),
     oauth_config: publicOAuthConfig(req)
@@ -1042,7 +1124,7 @@ async function refreshProviderAccessToken(providerName, store) {
   const expiresIn = Number(data.expires_in || 3600);
   store.providers[providerName] = {
     ...existing,
-    access_token: data.access_token,
+    access_token: normalizeOAuthAccessToken(data.access_token),
     refresh_token: data.refresh_token || existing.refresh_token,
     expires_at: Date.now() + expiresIn * 1000,
     scope: data.scope || existing.scope || provider.scopes.join(' '),
@@ -1050,7 +1132,7 @@ async function refreshProviderAccessToken(providerName, store) {
     updated_at: Date.now()
   };
 
-  return { accessToken: data.access_token, refreshed: true, reason: '' };
+  return { accessToken: normalizeOAuthAccessToken(data.access_token), refreshed: true, reason: '' };
 }
 
 async function providerAccess(req, providerName, store) {
@@ -1084,14 +1166,32 @@ async function getMcpTools(req, body) {
         oauth_provider: connector.provider,
         oauth_url: `${apiRouteFor(req, `/api/oauth/start/${connector.provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
         oauth_reason: tokenState.reason,
-        oauth_status: publicTokenMeta(store.providers?.[connector.provider])
+        oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider)
+      });
+    }
+    const scopeText = store.providers?.[connector.provider]?.scope || '';
+    const requiredScopes = CONNECTOR_SCOPE_REQUIREMENTS[id] || [];
+    const missing = missingScopes(scopeText, requiredScopes);
+    if (missing.length) {
+      throw Object.assign(new Error(`Faltan permisos de OAuth para ${connector.label}. Reconecta ${OAUTH_PROVIDERS[connector.provider]?.label || connector.provider}.`), {
+        status: 401,
+        oauth_provider: connector.provider,
+        oauth_url: `${apiRouteFor(req, `/api/oauth/start/${connector.provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+        oauth_reason: 'missing_scopes',
+        oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider),
+        diagnostic: {
+          connector: id,
+          connector_id: connector.connector_id,
+          required_scopes: requiredScopes,
+          missing_scopes: missing
+        }
       });
     }
     tools.push({
       type: 'mcp',
       server_label: id,
       connector_id: connector.connector_id,
-      authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}`,
+      authorization: normalizeOAuthAccessToken(token),
       require_approval: process.env.MCP_REQUIRE_APPROVAL || 'never'
     });
   }
@@ -1107,7 +1207,7 @@ async function getMcpTools(req, body) {
       require_approval: server?.require_approval || process.env.MCP_REQUIRE_APPROVAL || 'never'
     };
     if (Array.isArray(server.allowed_tools) && server.allowed_tools.length) tool.allowed_tools = server.allowed_tools.map(String);
-    if (server.authorization) tool.authorization = String(server.authorization).startsWith('Bearer ') ? server.authorization : `Bearer ${server.authorization}`;
+    if (server.authorization) tool.authorization = String(server.authorization).trim();
     tools.push(tool);
   }
 
@@ -1166,6 +1266,41 @@ async function callOpenAI(req, payload) {
     });
   }
   return data;
+}
+
+function selectedConnectorEntries(body = {}) {
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
+  return selected.map(id => [id, CONNECTORS[id]]).filter(([, connector]) => connector);
+}
+
+function normalizeConnectorOAuthError(error, req, body = {}) {
+  if (error?.oauth_provider || !selectedConnectorEntries(body).length) return error;
+  const upstreamText = [
+    error?.message,
+    typeof error?.upstream === 'string' ? error.upstream : JSON.stringify(error?.upstream || {})
+  ].join(' ');
+  const looksLikeAuth = [401, 403].includes(Number(error?.status))
+    || /\b(auth|oauth|token|credential|permission|scope|unauthori[sz]ed|forbidden|not authorized)\b/i.test(upstreamText);
+  if (!looksLikeAuth) return error;
+
+  const entries = selectedConnectorEntries(body);
+  const mentioned = entries.find(([id, connector]) => upstreamText.includes(id) || upstreamText.includes(connector.connector_id));
+  const [, connector] = mentioned || entries[0];
+  const provider = connector.provider;
+  const providerLabel = OAUTH_PROVIDERS[provider]?.label || provider;
+  return Object.assign(new Error(`OpenAI no pudo usar los datos de ${connector.label}. Reconecta ${providerLabel} y acepta todos los permisos solicitados.`), {
+    status: 401,
+    oauth_provider: provider,
+    oauth_url: `${apiRouteFor(req, `/api/oauth/start/${provider}`)}?return_to=${encodeURIComponent(new URL(absoluteBaseUrl(req)).pathname || '/')}`,
+    oauth_reason: 'openai_connector_auth_failed',
+    oauth_status: publicTokenMeta(readOAuthStore(req).providers?.[provider], provider),
+    diagnostic: {
+      connector: mentioned?.[0] || entries[0]?.[0],
+      connector_id: connector.connector_id,
+      openai_status: error?.status || null
+    },
+    upstream: error?.upstream
+  });
 }
 
 function isImageFile(file = {}) {
@@ -1338,8 +1473,9 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
 }
 
 async function handleAnalyze(req, res) {
+  let body = {};
   try {
-    const body = await readJsonBody(req);
+    body = await readJsonBody(req);
     const profileUrls = normalizeUrlList(body.profile_urls || []);
     const scraped = [];
     for (const url of profileUrls.slice(0, 12)) scraped.push(await scrapeOne(url));
@@ -1362,24 +1498,26 @@ async function handleAnalyze(req, res) {
       raw_status: openai.status || null
     }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
-    return sendJson(res, error.status || 500, {
+    const normalizedError = normalizeConnectorOAuthError(error, req, body);
+    return sendJson(res, normalizedError.status || 500, {
       ok: false,
       error: {
-        message: error.message || 'Analysis error',
-        oauth_provider: error.oauth_provider,
-        oauth_url: error.oauth_url,
-        oauth_reason: error.oauth_reason,
-        oauth_status: error.oauth_status,
-        diagnostic: error.diagnostic,
-        upstream: error.upstream
+        message: normalizedError.message || 'Analysis error',
+        oauth_provider: normalizedError.oauth_provider,
+        oauth_url: normalizedError.oauth_url,
+        oauth_reason: normalizedError.oauth_reason,
+        oauth_status: normalizedError.oauth_status,
+        diagnostic: normalizedError.diagnostic,
+        upstream: normalizedError.upstream
       }
     });
   }
 }
 
 async function handleMessages(req, res) {
+  let body = {};
   try {
-    const body = await readJsonBody(req);
+    body = await readJsonBody(req);
     const input = Array.isArray(body.messages)
       ? body.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }))
       : [{ role: 'user', content: String(body.input || body.prompt || '') }];
@@ -1402,15 +1540,16 @@ async function handleMessages(req, res) {
       raw_status: openai.status || null
     }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
   } catch (error) {
-    return sendJson(res, error.status || 500, {
+    const normalizedError = normalizeConnectorOAuthError(error, req, body);
+    return sendJson(res, normalizedError.status || 500, {
       error: {
-        message: error.message || 'OpenAI proxy error',
-        oauth_provider: error.oauth_provider,
-        oauth_url: error.oauth_url,
-        oauth_reason: error.oauth_reason,
-        oauth_status: error.oauth_status,
-        diagnostic: error.diagnostic,
-        upstream: error.upstream
+        message: normalizedError.message || 'OpenAI proxy error',
+        oauth_provider: normalizedError.oauth_provider,
+        oauth_url: normalizedError.oauth_url,
+        oauth_reason: normalizedError.oauth_reason,
+        oauth_status: normalizedError.oauth_status,
+        diagnostic: normalizedError.diagnostic,
+        upstream: normalizedError.upstream
       }
     });
   }
@@ -1485,8 +1624,8 @@ function publicDiagnostics(req = null) {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
       microsoft_tenant: MICROSOFT_TENANT,
       providers: {
-        google: publicTokenMeta(store.providers?.google),
-        microsoft: publicTokenMeta(store.providers?.microsoft)
+        google: publicTokenMeta(store.providers?.google, 'google'),
+        microsoft: publicTokenMeta(store.providers?.microsoft, 'microsoft')
       },
       config: req ? publicOAuthConfig(req) : {}
     },

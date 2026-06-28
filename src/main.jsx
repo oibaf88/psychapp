@@ -110,6 +110,14 @@ function App() {
     return Boolean(oauth?.providers?.[provider]?.connected);
   }
 
+  function providerStatus(provider) {
+    return oauth?.providers?.[provider] || null;
+  }
+
+  function connectorStatus(id) {
+    return oauth?.connectors?.[id] || null;
+  }
+
   function toggleConnector(id) {
     setSelectedConnectors(current => current.includes(id)
       ? current.filter(item => item !== id)
@@ -337,6 +345,7 @@ function App() {
             <ProviderRow
               name="Google"
               connected={providerConnected('google')}
+              status={providerStatus('google')}
               busy={busy === 'disconnect-google'}
               onConnect={() => connectProvider('google')}
               onDisconnect={() => disconnectProvider('google')}
@@ -344,6 +353,7 @@ function App() {
             <ProviderRow
               name="Microsoft"
               connected={providerConnected('microsoft')}
+              status={providerStatus('microsoft')}
               busy={busy === 'disconnect-microsoft'}
               onConnect={() => connectProvider('microsoft')}
               onDisconnect={() => disconnectProvider('microsoft')}
@@ -365,6 +375,7 @@ function App() {
                   connector={connector}
                   selected={selectedConnectors.includes(connector.id)}
                   connected={providerConnected(connector.provider)}
+                  status={connectorStatus(connector.id)}
                   onToggle={() => toggleConnector(connector.id)}
                 />
               ))}
@@ -606,28 +617,57 @@ function StatusPill({ ok, label }) {
   );
 }
 
-function ProviderRow({ name, connected, busy, onConnect, onDisconnect }) {
+function ProviderRow({ name, connected, status, busy, onConnect, onDisconnect }) {
+  const connectorStates = Object.values(status?.connector_scope_status || {});
+  const missing = connectorStates.filter(item => item && item.ready === false).map(item => item.label);
+  const stateText = !connected
+    ? 'Sin enlazar'
+    : missing.length
+      ? `Reconectar permisos: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? '...' : ''}`
+      : 'Permisos listos';
   return (
-    <div className="provider-row">
+    <div className={missing.length ? 'provider-row needs-auth' : 'provider-row'}>
       <span className={connected ? 'dot connected' : 'dot'} />
-      <strong>{name}</strong>
-      <button onClick={connected ? onDisconnect : onConnect}>
-        {busy ? <Loader2 className="spin" size={16} /> : null}
-        {connected ? 'Desconectar' : 'Conectar'}
-      </button>
+      <span className="provider-copy">
+        <strong>{name}</strong>
+        <small>{stateText}</small>
+      </span>
+      <span className="provider-actions">
+        <button onClick={onConnect}>
+          {connected ? 'Reconectar' : 'Conectar'}
+        </button>
+        {connected && (
+          <button onClick={onDisconnect} aria-label={`Desconectar ${name}`}>
+            {busy ? <Loader2 className="spin" size={16} /> : null}
+            Salir
+          </button>
+        )}
+      </span>
     </div>
   );
 }
 
-function ConnectorToggle({ connector, selected, connected, onToggle }) {
+function ConnectorToggle({ connector, selected, connected, status, onToggle }) {
   const Icon = connector.icon;
+  const ready = Boolean(status?.ready);
+  const missing = Array.isArray(status?.missing_scopes) ? status.missing_scopes : [];
+  const statusText = !connected
+    ? 'OAuth pendiente'
+    : ready
+      ? 'Permisos listos'
+      : `Reconectar permisos${missing.length ? `: ${missing.slice(0, 2).join(', ')}` : ''}`;
+  const className = [
+    'connector',
+    selected ? 'selected' : '',
+    connected && !ready ? 'needs-auth' : ''
+  ].filter(Boolean).join(' ');
   return (
-    <label className={selected ? 'connector selected' : 'connector'}>
+    <label className={className}>
       <input type="checkbox" checked={selected} onChange={onToggle} />
       <Icon size={18} />
       <span>
         <strong>{connector.label}</strong>
-        <small>{connected ? 'OAuth listo' : 'OAuth pendiente'}</small>
+        <small>{statusText}</small>
       </span>
     </label>
   );

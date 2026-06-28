@@ -194,7 +194,7 @@ p {
 
 .provider-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 0;
@@ -203,6 +203,26 @@ p {
 
 .provider-row:first-of-type {
   border-top: 0;
+}
+
+.provider-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.provider-copy small {
+  overflow-wrap: anywhere;
+  color: #6a7890;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.provider-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .provider-row button,
@@ -251,6 +271,14 @@ p {
 .connector.selected {
   border-color: rgba(20, 93, 178, 0.48);
   background: #e2f0ff;
+}
+
+.provider-row.needs-auth .dot { background: #f59e0b; }
+.connector.needs-auth input { accent-color: #f59e0b; }
+
+.provider-row.needs-auth .provider-copy small,
+.connector.needs-auth small {
+  color: #b96b04;
 }
 
 .connector input {
@@ -767,6 +795,23 @@ textarea:focus {
 
 .dot {
   background: var(--danger);
+}
+
+.provider-copy small {
+  color: var(--muted);
+}
+
+.provider-row.needs-auth .dot {
+  background: var(--warning);
+}
+
+.provider-row.needs-auth .provider-copy small,
+.connector.needs-auth small {
+  color: var(--warning);
+}
+
+.connector.needs-auth {
+  border-color: rgba(251, 191, 36, 0.32);
 }
 
 .method-strip span,
