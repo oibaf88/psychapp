@@ -64,10 +64,16 @@ const ANALYSIS_MODES = [
   { id: 'clinical_report', label: 'Informe clínico' }
 ];
 
+function sameStringList(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
 function App() {
   const [health, setHealth] = useState(null);
   const [oauth, setOauth] = useState(null);
   const [selectedConnectors, setSelectedConnectors] = useState([]);
+  const [manualConnectorSelection, setManualConnectorSelection] = useState(false);
   const [files, setFiles] = useState([]);
   const [centralText, setCentralText] = useState('');
   const [centralDocument, setCentralDocument] = useState(null);
@@ -86,6 +92,14 @@ function App() {
   useEffect(() => {
     refreshStatus();
   }, []);
+
+  useEffect(() => {
+    if (!oauth || manualConnectorSelection) return;
+    const readyIds = CONNECTORS
+      .filter(connector => oauth?.connectors?.[connector.id]?.ready)
+      .map(connector => connector.id);
+    setSelectedConnectors(current => sameStringList(current, readyIds) ? current : readyIds);
+  }, [oauth, manualConnectorSelection]);
 
   const activeProfileUrls = useMemo(
     () => profiles.filter(profile => profile.enabled && profile.url.trim()).map(profile => profile.url.trim()),
@@ -119,6 +133,7 @@ function App() {
   }
 
   function toggleConnector(id) {
+    setManualConnectorSelection(true);
     setSelectedConnectors(current => current.includes(id)
       ? current.filter(item => item !== id)
       : [...current, id]
@@ -126,6 +141,7 @@ function App() {
   }
 
   async function connectProvider(provider) {
+    setManualConnectorSelection(false);
     window.location.href = `${API_BASE}/oauth/start/${provider}?return_to=${encodeURIComponent(`${window.location.pathname}${window.location.search}` || HOME_PATH)}`;
   }
 
