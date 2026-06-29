@@ -27,6 +27,7 @@ const MAX_UPLOADED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_UPLOADED_IMAG
 const MAX_SCRAPED_IMAGES_FOR_VISION = positiveInt(process.env.MAX_SCRAPED_IMAGES_FOR_VISION, 8);
 const MAX_UPLOADED_DOCUMENTS_FOR_MODEL = positiveInt(process.env.MAX_UPLOADED_DOCUMENTS_FOR_MODEL, 8);
 const OAUTH_COOKIE = 'psychapp_oauth';
+const OAUTH_SESSION_COOKIE = 'psychapp_oauth_sid';
 const STATE_COOKIE = 'psychapp_oauth_state';
 const OAUTH_COOKIE_TTL_SECONDS = positiveInt(process.env.OAUTH_COOKIE_TTL_SECONDS, 60 * 60 * 24 * 7);
 const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'common';
@@ -257,6 +258,12 @@ function getSupabaseKeyWithMeta() {
   ]);
 }
 
+function supabaseConfig() {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = getSupabaseKeyWithMeta();
+  return { url, key };
+}
+
 function supabaseKeyKind(source = '') {
   const text = String(source || '').toLowerCase();
   if (text.includes('service_role')) return 'service_role';
@@ -383,6 +390,22 @@ function cookieDomainMatches(req, domain) {
   return Boolean(host && clean && (host === clean || host.endsWith(`.${clean}`)));
 }
 
+function validOAuthSessionId(value) {
+  return /^[A-Za-z0-9_-]{32,160}$/.test(String(value || ''));
+}
+
+function oauthSessionIdFromRequest(req) {
+  const value = parseCookies(req)[OAUTH_SESSION_COOKIE];
+  return validOAuthSessionId(value) ? value : '';
+}
+
+function clearOAuthCookieHeaders(req) {
+  return [
+    cookieString(OAUTH_SESSION_COOKIE, '', req, { maxAge: 0 }),
+    cookieString(OAUTH_COOKIE, '', req, { maxAge: 0 })
+  ];
+}
+
 function cryptoKey() {
   const configured = findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value;
   const fallback = getOpenAIKeyWithMeta().value || 'dev-only-psychapp-cookie-secret-change-me';
@@ -450,6 +473,100 @@ function writeOAuthStore(req, store) {
   return cookieString(OAUTH_COOKIE, encryptJson({ ...store, updated_at: Date.now() }), req, {
     maxAge: OAUTH_COOKIE_TTL_SECONDS
   });
+}
+
+async function supabaseSessionRequest(pathSuffix, options = {}, sessionId = '') {
+  const { url, key } = supabaseConfig();
+  if (!url || !key.value) return { ok: false, skipped: true, reason: 'Supabase no configurado' };
+  const headers = {
+    apikey: key.value,
+    Authorization: `Bearer ${key.value}`,
+    Accept: 'application/json',
+    ...(options.headers || {})
+  };
+  if (sessionId) headers['x-psychapp-session'] = sessionId;
+  const response = await fetchWithTimeout(`${url}/rest/v1/psychapp_oauth_sessions${pathSuffix}`, {
+    ...options,
+    headers
+  }, SUPABASE_TIMEOUT_MS);
+  return { ok: response.ok, response };
+}
+
+async function readOAuthStoreAsync(req) {
+  const sessionId = oauthSessionIdFromRequest(req);
+  if (sessionId) {
+    try {
+      const result = await supabaseSessionRequest(
+        `?session_id=eq.${encodeURIComponent(sessionId)}&select=token_store`,
+        { method: 'GET' },
+        sessionId
+      );
+      if (result.ok) {
+        const rows = await result.response.json();
+        const store = decryptJson(rows?.[0]?.token_store);
+        if (store && typeof store === 'object') {
+          if (!store.providers || typeof store.providers !== 'object') store.providers = {};
+          return store;
+        }
+      }
+    } catch (error) {
+      console.warn('[oauth] Supabase session read failed:', error?.message || error);
+    }
+  }
+
+  return readOAuthStore(req);
+}
+
+async function writeOAuthStoreAsync(req, store) {
+  const sessionId = oauthSessionIdFromRequest(req) || randomUrlSafe(48);
+  const payload = {
+    session_id: sessionId,
+    token_store: encryptJson({ ...store, updated_at: Date.now() }),
+    updated_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + OAUTH_COOKIE_TTL_SECONDS * 1000).toISOString()
+  };
+
+  try {
+    const result = await supabaseSessionRequest(
+      '?on_conflict=session_id',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal'
+        },
+        body: JSON.stringify(payload)
+      },
+      sessionId
+    );
+    if (result.ok) {
+      return [
+        cookieString(OAUTH_SESSION_COOKIE, sessionId, req, { maxAge: OAUTH_COOKIE_TTL_SECONDS }),
+        cookieString(OAUTH_COOKIE, '', req, { maxAge: 0 })
+      ];
+    }
+    const text = result.response ? await result.response.text() : result.reason || '';
+    console.warn('[oauth] Supabase session write failed:', text.slice(0, 400));
+  } catch (error) {
+    console.warn('[oauth] Supabase session write error:', error?.message || error);
+  }
+
+  return [
+    writeOAuthStore(req, store),
+    cookieString(OAUTH_SESSION_COOKIE, '', req, { maxAge: 0 })
+  ];
+}
+
+async function clearOAuthStoreAsync(req) {
+  const sessionId = oauthSessionIdFromRequest(req);
+  if (sessionId) {
+    try {
+      await supabaseSessionRequest(`?session_id=eq.${encodeURIComponent(sessionId)}`, { method: 'DELETE' }, sessionId);
+    } catch (error) {
+      console.warn('[oauth] Supabase session delete failed:', error?.message || error);
+    }
+  }
+  return clearOAuthCookieHeaders(req);
 }
 
 function publicTokenMeta(token = {}, providerName = '') {
@@ -695,7 +812,7 @@ async function handleOAuthCallback(req, res, providerName) {
     }, 'OAuth falló', tokenJson?.error_description || tokenJson?.error || `HTTP ${tokenResponse.status}`, APP_BASE_PATH || '/');
   }
 
-  const store = readOAuthStore(req);
+  const store = await readOAuthStoreAsync(req);
   const expiresIn = Number(tokenJson.expires_in || 3600);
   store.providers[providerName] = {
     access_token: normalizeOAuthAccessToken(tokenJson.access_token),
@@ -715,7 +832,7 @@ async function handleOAuthCallback(req, res, providerName) {
   });
 
   const headers = [
-    writeOAuthStore(req, store),
+    ...(await writeOAuthStoreAsync(req, store)),
     cookieString(STATE_COOKIE, '', req, { maxAge: 0 })
   ];
   return redirect(res, `${statePayload.return_to || APP_BASE_PATH || '/'}?oauth=${providerName}_connected`, {
@@ -762,8 +879,8 @@ function resultHtml(title, message, returnTo) {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body style="font-family:system-ui;padding:2rem;line-height:1.5;background:#eef6ff;color:#10233f"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="${escapeHtml(returnTo)}">Volver a PsychApp</a></p></body></html>`;
 }
 
-function handleOAuthStatus(req, res) {
-  const store = readOAuthStore(req);
+async function handleOAuthStatus(req, res) {
+  const store = await readOAuthStoreAsync(req);
   const providerStatus = {
     google: publicTokenMeta(store.providers?.google, 'google'),
     microsoft: publicTokenMeta(store.providers?.microsoft, 'microsoft')
@@ -799,12 +916,14 @@ function publicOAuthConfig(req) {
   }));
 }
 
-function handleOAuthLogout(req, res, providerName = '') {
-  const store = readOAuthStore(req);
+async function handleOAuthLogout(req, res, providerName = '') {
+  const store = await readOAuthStoreAsync(req);
   if (providerName) delete store.providers?.[providerName];
   else store.providers = {};
+  const providersLeft = Object.values(store.providers || {}).some(provider => provider?.access_token);
+  const cookies = providersLeft ? await writeOAuthStoreAsync(req, store) : await clearOAuthStoreAsync(req);
   return sendJson(res, 200, { ok: true, disconnected: providerName || 'all' }, {
-    'Set-Cookie': writeOAuthStore(req, store)
+    'Set-Cookie': cookies
   });
 }
 
@@ -1252,7 +1371,7 @@ async function providerAccess(req, providerName, store) {
 
 async function getMcpTools(req, body) {
   const tools = [];
-  const store = readOAuthStore(req);
+  const store = await readOAuthStoreAsync(req);
   let refreshed = false;
   const providerCache = new Map();
   const selectedConnectorIds = Array.isArray(body.connector_ids) ? body.connector_ids : [];
@@ -1266,13 +1385,14 @@ async function getMcpTools(req, body) {
     refreshed = refreshed || Boolean(tokenState.refreshed);
     const token = tokenState.accessToken;
     if (!token) {
+      const refreshedCookies = refreshed ? await writeOAuthStoreAsync(req, store) : [];
       throw Object.assign(new Error(`OAuth requerido para ${connector.label}`), {
         status: 401,
         oauth_provider: connector.provider,
         oauth_url: oauthStartUrl(req, connector.provider),
         oauth_reason: tokenState.reason,
         oauth_status: publicTokenMeta(store.providers?.[connector.provider], connector.provider),
-        refreshed_cookie: refreshed ? writeOAuthStore(req, store) : ''
+        refreshed_cookies: refreshedCookies
       });
     }
     const scopeText = store.providers?.[connector.provider]?.scope || '';
@@ -1319,7 +1439,7 @@ async function getMcpTools(req, body) {
 
   return {
     tools,
-    refreshed_cookie: refreshed ? writeOAuthStore(req, store) : ''
+    refreshed_cookies: refreshed ? await writeOAuthStoreAsync(req, store) : []
   };
 }
 
@@ -1379,7 +1499,7 @@ function selectedConnectorEntries(body = {}) {
   return selected.map(id => [id, CONNECTORS[id]]).filter(([, connector]) => connector);
 }
 
-function normalizeConnectorOAuthError(error, req, body = {}) {
+async function normalizeConnectorOAuthError(error, req, body = {}) {
   if (error?.oauth_provider || !selectedConnectorEntries(body).length) return error;
   const upstreamText = [
     error?.message,
@@ -1394,12 +1514,13 @@ function normalizeConnectorOAuthError(error, req, body = {}) {
   const [, connector] = mentioned || entries[0];
   const provider = connector.provider;
   const providerLabel = OAUTH_PROVIDERS[provider]?.label || provider;
+  const store = await readOAuthStoreAsync(req);
   return Object.assign(new Error(`OpenAI no pudo usar los datos de ${connector.label}. Reconecta ${providerLabel} y acepta todos los permisos solicitados.`), {
     status: 401,
     oauth_provider: provider,
     oauth_url: oauthStartUrl(req, provider),
     oauth_reason: 'openai_connector_auth_failed',
-    oauth_status: publicTokenMeta(readOAuthStore(req).providers?.[provider], provider),
+    oauth_status: publicTokenMeta(store.providers?.[provider], provider),
     diagnostic: {
       connector: mentioned?.[0] || entries[0]?.[0],
       connector_id: connector.connector_id,
@@ -1744,9 +1865,9 @@ async function handleAnalyze(req, res) {
       saved: save,
       raw_id: openai.id || null,
       raw_status: openai.status || null
-    }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
+    }, mcp.refreshed_cookies?.length ? { 'Set-Cookie': mcp.refreshed_cookies } : {});
   } catch (error) {
-    const normalizedError = normalizeConnectorOAuthError(error, req, body);
+    const normalizedError = await normalizeConnectorOAuthError(error, req, body);
     await logPsychappEvent(req, 'psychapp.analyze.error', {
       request_id: requestId,
       route: '/api/analyze',
@@ -1754,7 +1875,7 @@ async function handleAnalyze(req, res) {
       ...analysisErrorMeta(normalizedError),
       scopes: normalizedError.oauth_status?.required_scopes || []
     });
-    const headers = normalizedError.refreshed_cookie ? { 'Set-Cookie': normalizedError.refreshed_cookie } : {};
+    const headers = normalizedError.refreshed_cookies?.length ? { 'Set-Cookie': normalizedError.refreshed_cookies } : {};
     return sendJson(res, normalizedError.status || 500, {
       ok: false,
       error: {
@@ -1794,10 +1915,10 @@ async function handleMessages(req, res) {
       provider: 'openai',
       raw_id: openai.id || null,
       raw_status: openai.status || null
-    }, mcp.refreshed_cookie ? { 'Set-Cookie': mcp.refreshed_cookie } : {});
+    }, mcp.refreshed_cookies?.length ? { 'Set-Cookie': mcp.refreshed_cookies } : {});
   } catch (error) {
-    const normalizedError = normalizeConnectorOAuthError(error, req, body);
-    const headers = normalizedError.refreshed_cookie ? { 'Set-Cookie': normalizedError.refreshed_cookie } : {};
+    const normalizedError = await normalizeConnectorOAuthError(error, req, body);
+    const headers = normalizedError.refreshed_cookies?.length ? { 'Set-Cookie': normalizedError.refreshed_cookies } : {};
     return sendJson(res, normalizedError.status || 500, {
       error: {
         message: normalizedError.message || 'OpenAI proxy error',
@@ -1991,9 +2112,13 @@ const server = http.createServer((req, res) => {
 
   if (pathname === '/api/health') return sendJson(res, 200, healthDiagnostics(req));
   if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));
-  if (pathname === '/api/oauth/status') return handleOAuthStatus(req, res);
-  if (pathname === '/api/oauth/logout') return req.method === 'POST' ? handleOAuthLogout(req, res) : methodNotAllowed(res, 'POST');
-  if (pathname.startsWith('/api/oauth/logout/')) return req.method === 'POST' ? handleOAuthLogout(req, res, pathname.split('/').pop()) : methodNotAllowed(res, 'POST');
+  if (pathname === '/api/oauth/status') return handleOAuthStatus(req, res).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }));
+  if (pathname === '/api/oauth/logout') return req.method === 'POST'
+    ? handleOAuthLogout(req, res).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
+    : methodNotAllowed(res, 'POST');
+  if (pathname.startsWith('/api/oauth/logout/')) return req.method === 'POST'
+    ? handleOAuthLogout(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
+    : methodNotAllowed(res, 'POST');
   if (pathname.startsWith('/api/oauth/start/')) return req.method === 'GET'
     ? handleOAuthStart(req, res, pathname.split('/').pop()).catch(error => sendJson(res, error.status || 500, { error: { message: error.message } }))
     : methodNotAllowed(res, 'GET');
