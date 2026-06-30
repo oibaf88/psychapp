@@ -26,7 +26,7 @@ En este entorno de Codex se usa el Node incluido por la app si `node` no esta en
 - `OPENAI_API_KEY`: clave de OpenAI server-side.
 - `OPENAI_MODEL`: modelo para Responses API. Por defecto `gpt-5.5`.
 - `APP_BASE_PATH`: `/psychapp`.
-- `PUBLIC_BASE_URL`: `https://ondender.com/psychapp` en produccion.
+- `PUBLIC_BASE_URL`: `https://psychapp.bfab.io` en produccion.
 - `OAUTH_COOKIE_SECRET`: secreto largo para cifrar cookies OAuth.
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
@@ -48,12 +48,13 @@ El backend rechaza analisis de datos personales o conectados sin consentimiento 
 - Google: `/psychapp/api/oauth/callback/google`
 - Microsoft: `/psychapp/api/oauth/callback/microsoft`
 
-Con `PUBLIC_BASE_URL=https://ondender.com/psychapp`, las URLs completas son:
+Con `PUBLIC_BASE_URL=https://psychapp.bfab.io`, las URLs completas son:
 
-- `https://ondender.com/psychapp/api/oauth/callback/google`
-- `https://ondender.com/psychapp/api/oauth/callback/microsoft`
+- `https://psychapp.bfab.io/api/oauth/callback/google`
+- `https://psychapp.bfab.io/api/oauth/callback/microsoft`
 
 ## Render
 
 `render.yaml` define un servicio web Node con healthcheck en `/psychapp/api/health`.
+El endpoint verificado actual es `https://psychapp.bfab.io/psychapp/api/health`.
 Para que `https://ondender.com/psychapp` funcione, el dominio debe resolver y enrutar ese path hacia el servicio Render.

@@ -151,7 +151,7 @@ Preferred names:
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 ```
 
 Accepted aliases:
@@ -173,10 +173,10 @@ Microsoft redirect URI to register in Microsoft Entra:
 https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
-For personal Outlook/Hotmail/Live accounts, keep:
+For broad Google/Microsoft connector compatibility, the currently verified Render deployment uses:
 
 ```env
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 ```
 
 Do not set `MICROSOFT_SCOPES` unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
@@ -202,6 +202,17 @@ Team.ReadBasic.All
 ```
 
 Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams.
+
+## Supabase server-side persistence
+
+Use a server-only service role secret for persistence and audit writes:
+
+```env
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-side service role key>
+```
+
+Do not use an anon/publishable key for `SUPABASE_SERVICE_ROLE_KEY`; anon keys cannot reliably insert server-side audit/run rows that are intentionally restricted by RLS and grants.
 
 ## OAuth cookie secret generation
 

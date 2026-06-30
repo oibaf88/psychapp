@@ -8,28 +8,46 @@ services:
     healthCheckPath: /psychapp/api/health
     envVars:
       - key: NODE_VERSION
-        value: 22
+        value: 22.22.0
       - key: APP_BASE_PATH
         value: /psychapp
       - key: PUBLIC_BASE_URL
-        value: https://ondender.com/psychapp
+        value: https://psychapp.bfab.io
       - key: OPENAI_MODEL
         value: gpt-5.5
+      - key: OPENAI_STORE
+        value: "false"
       - key: OPENAI_API_KEY
         sync: false
+      - key: MCP_REQUIRE_APPROVAL
+        value: never
+      - key: ALLOW_CUSTOM_OAUTH_SCOPES
+        value: "false"
       - key: OAUTH_COOKIE_SECRET
         generateValue: true
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://psychapp.bfab.io/api/oauth/callback/google
       - key: MICROSOFT_CLIENT_ID
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
         sync: false
+      - key: MICROSOFT_REDIRECT_URI
+        value: https://psychapp.bfab.io/api/oauth/callback/microsoft
       - key: MICROSOFT_TENANT
         value: common
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: PSYCHAPP_MCP_PATH
+        value: /mcp
+      - key: PSYCHAPP_MCP_PUBLIC_BASE_URL
+        value: https://psychapp.bfab.io
+      - key: PSYCHAPP_MCP_OWNER_PIN
+        sync: false
+      - key: PSYCHAPP_MCP_OAUTH_SECRET
+        generateValue: true
