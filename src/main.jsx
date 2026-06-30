@@ -59,10 +59,7 @@ const EXPORT_SOURCES = [
 ];
 
 const ANALYSIS_MODES = [
-  { id: 'early_warning_report', label: 'Alerta temprana' },
-  { id: 'case_formulation', label: 'Formulación de caso' },
-  { id: 'personality', label: 'Personalidad' },
-  { id: 'clinical_report', label: 'Informe clínico' }
+  { id: 'early_warning_report', label: 'Alerta temprana' }
 ];
 
 const BEHAVIORAL_SOURCE_OPTIONS = [
@@ -88,9 +85,9 @@ const DEFAULT_BEHAVIORAL_CONSENT = {
   email_metadata: true,
   email_text: false,
   tasks: true,
-  notes: true,
+  notes: false,
   chat_history: false,
-  uploaded_files: true,
+  uploaded_files: false,
   public_profiles: false,
   remote_mcp: false,
   wearables: false,
@@ -116,8 +113,7 @@ function App() {
   const [analysisMode, setAnalysisMode] = useState('early_warning_report');
   const [behavioralConsent, setBehavioralConsent] = useState(DEFAULT_BEHAVIORAL_CONSENT);
   const [profiles, setProfiles] = useState([
-    { id: crypto.randomUUID(), url: 'https://x.com/oibafsaijem', enabled: true },
-    { id: crypto.randomUUID(), url: 'https://instagram.com/soyoibaf', enabled: true }
+    { id: crypto.randomUUID(), url: '', enabled: false }
   ]);
   const [remoteMcp, setRemoteMcp] = useState({ name: '', url: '', allowed: '' });
   const [notes, setNotes] = useState('');
@@ -346,7 +342,7 @@ function App() {
         body: JSON.stringify({ urls: activeProfileUrls })
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message || 'Scraping falló');
+      if (!response.ok) throw new Error(data?.error?.message || 'Scraping fallido');
       setScrapePreview(data.results);
     } catch (err) {
       setError(err.message);
@@ -396,7 +392,16 @@ function App() {
           window.location.href = data.error.oauth_url;
           return;
         }
-        throw new Error(data?.error?.message || 'Análisis falló');
+        const sourceViolations = data?.error?.diagnostic?.source_consent_violations;
+        if (Array.isArray(sourceViolations) && sourceViolations.length) {
+          const details = sourceViolations
+            .map(item => item.message || item.source || item.connector_label)
+            .filter(Boolean)
+            .slice(0, 4)
+            .join(' ');
+          throw new Error(`${data?.error?.message || 'Faltan permisos de fuente.'} ${details}`);
+        }
+        throw new Error(data?.error?.message || 'Analisis fallido');
       }
       setAnalysis(data);
       setScrapePreview(data.scraped || null);
@@ -412,7 +417,7 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href={HOME_PATH}>
-          <span className="brand-mark">ΨD</span>
+          <span className="brand-mark">PD</span>
           <span>
             <strong>PsychApp</strong>
             <small>Psyche Deep</small>
@@ -432,8 +437,8 @@ function App() {
           <section className="panel-block identity-block">
             <BrainCircuit size={28} />
             <div>
-              <h1>Modelo psicológico computacional</h1>
-              <p>Análisis prudente con OpenAI, MCP, OAuth, archivos y scraping público.</p>
+              <h1>Alerta temprana no diagnostica</h1>
+              <p>Analisis consentido con OpenAI, MCP, OAuth, archivos y datos publicos minimizados.</p>
             </div>
           </section>
 
@@ -459,7 +464,7 @@ function App() {
               onDisconnect={() => disconnectProvider('microsoft')}
             />
             {health?.oauth?.config?.microsoft?.client_id_present && !health?.oauth?.config?.microsoft?.client_secret_present && (
-              <p className="inline-warning">Microsoft está configurado sin client secret. Si Azure usa una app Web, añade MICROSOFT_CLIENT_SECRET en Render.</p>
+              <p className="inline-warning">Microsoft esta configurado sin client secret. Si Azure usa una app Web, anade MICROSOFT_CLIENT_SECRET en Render.</p>
             )}
           </section>
 
@@ -508,12 +513,12 @@ function App() {
         <section className="main-panel">
           <div className="analysis-header">
             <div>
-              <p className="eyebrow">Analysis workspace</p>
-              <h2>{isEarlyWarningMode ? 'Informe de alerta temprana' : 'Analisis exhaustivo'}</h2>
+              <p className="eyebrow">Early warning workspace</p>
+              <h2>Informe de alerta temprana</h2>
             </div>
             <button className="primary-button" onClick={runAnalysis} disabled={busy === 'analysis'}>
               {busy === 'analysis' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              {isEarlyWarningMode ? 'Generar informe de alerta' : 'Iniciar analisis completo'}
+              Generar informe de alerta
             </button>
           </div>
 
@@ -523,9 +528,9 @@ function App() {
             <div className="section-title split">
               <span>
                 <ClipboardList size={18} />
-                <h3>Documento central del análisis</h3>
+                <h3>Documento central del analisis</h3>
               </span>
-              <div className="mode-tabs" role="tablist" aria-label="Tipo de análisis">
+              <div className="mode-tabs" role="tablist" aria-label="Tipo de analisis">
                 {ANALYSIS_MODES.map(mode => (
                   <button
                     key={mode.id}
@@ -542,7 +547,7 @@ function App() {
               className="central-textarea"
               value={centralText}
               onChange={event => setCentralText(event.target.value)}
-              placeholder="Pega aquí el relato principal, motivo de consulta, autobiografía, informe previo, formulación inicial o texto base. Esta será la pieza central del análisis."
+              placeholder="Pega aqui el relato principal, rutina reciente, notas personales o texto base. Se usara solo si autorizas Notas/Drive o Archivos."
             />
             <div className="central-actions">
               <label className="compact-upload">
@@ -614,6 +619,7 @@ function App() {
                 </div>
               </div>
             </div>
+            <p className="inline-warning">Los conectores Gmail y Outlook pueden exponer contenido de mensajes al modelo; habilita Texto email solo si consientes esa fuente. Calendario y tareas pueden usarse con datos agregados.</p>
           </section>
 
           <div className="input-grid">
@@ -625,10 +631,10 @@ function App() {
               <textarea
                 value={notes}
                 onChange={event => setNotes(event.target.value)}
-                placeholder="Contexto adicional, dudas, hipótesis propias, objetivos o matices clínicos no sensibles..."
+                placeholder="Contexto adicional, dudas, hipotesis propias, objetivos o matices no diagnosticos..."
               />
-              <div className="method-strip" aria-label="Capas de análisis">
-                {['OCEAN', 'LIWC', 'Apego', 'Young', 'Sesgos', 'Riesgo', 'Cronología'].map(label => (
+              <div className="method-strip" aria-label="Capas de analisis">
+                {['Rutina', 'Sueno', 'Contacto', 'Tareas', 'Lenguaje', 'Riesgo', 'Cronologia'].map(label => (
                   <span key={label}>{label}</span>
                 ))}
               </div>
@@ -665,7 +671,7 @@ function App() {
             <div className="section-title split">
               <span>
                 <Search size={18} />
-                <h3>Perfiles públicos</h3>
+                <h3>Perfiles publicos</h3>
               </span>
               <button className="secondary-button" onClick={runScrape} disabled={busy === 'scrape' || !activeProfileUrls.length}>
                 {busy === 'scrape' ? <Loader2 className="spin" size={17} /> : <Globe2 size={17} />}
@@ -697,7 +703,7 @@ function App() {
 
             <button className="ghost-button" onClick={addProfile}>
               <Plus size={17} />
-              Añadir perfil público
+              Anadir perfil publico
             </button>
           </section>
 
@@ -712,7 +718,7 @@ function App() {
               ) : (
                 <div className="empty-state">
                   <BrainCircuit size={42} />
-                  <p>Listo para analizar datos conectados, archivos y perfiles públicos.</p>
+                  <p>Listo para generar un informe no diagnostico con fuentes consentidas.</p>
                 </div>
               )}
             </div>
@@ -727,7 +733,7 @@ function App() {
                   {scrapePreview.map(item => (
                     <article key={`${item.url}-${item.fetched_at}`} className={item.ok ? 'scrape-ok' : 'scrape-fail'}>
                       <strong>{item.title || item.url}</strong>
-                      <span>{item.status || 'ERR'} · {item.elapsed_ms} ms · {item.stats?.words || 0} palabras · {item.media?.length || 0} medios</span>
+                      <span>{item.status || 'ERR'} - {item.elapsed_ms} ms - {item.stats?.words || 0} palabras - {item.media?.length || 0} medios</span>
                       <p>{item.description || item.text || item.error}</p>
                       {item.topics?.length > 0 && (
                         <div className="topic-list">

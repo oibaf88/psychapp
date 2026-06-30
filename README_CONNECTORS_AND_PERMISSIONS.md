@@ -142,3 +142,18 @@ After changing Google/Microsoft consent screen permissions, API enablement, redi
 
 If a provider is connected but a connector is not ready, the token is valid but missing one or more required scopes.
 
+## 6. Early-warning source consent behavior
+
+`/psychapp/api/analyze` always runs as `early_warning_report`. The backend rejects selected data sources that are not explicitly allowed in `mental_health_early_warning.allowed_sources`.
+
+Important source rules:
+
+- Gmail and Outlook connectors require `email_text`, because the OpenAI connector can retrieve message content.
+- Google Calendar and Outlook Calendar require `calendar`.
+- Google Drive and OneDrive / SharePoint require `notes` or `uploaded_files`.
+- Microsoft Teams requires `chat_history`.
+- Public profile URLs require `public_profiles`.
+- Uploaded documents require `uploaded_files`.
+- Pasted notes or central text require `notes` or `uploaded_files`.
+
+When a source is missing, the API returns `source_consent_violations` instead of silently skipping the source.
