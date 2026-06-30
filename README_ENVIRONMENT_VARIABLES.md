@@ -38,7 +38,7 @@ MICROSOFT_COOKIE_ID=
 GOOGLE_COOKIE_ID=
 ```
 
-The backend stores all OAuth provider sessions in the same encrypted HttpOnly cookie named `psychapp_oauth`.
+The backend uses a small HttpOnly session cookie named `psychapp_oauth_sid`. OAuth token payloads should be stored server-side through Supabase when `SUPABASE_URL` and a server-only Supabase key are configured.
 
 ## Critical rule about scopes
 
@@ -85,7 +85,7 @@ PUBLIC_BASE_URL=https://psychapp.bfab.io/
 
 ## OpenAI
 
-Recommended on Render: use a Secret File, not a normal env var.
+Recommended on Render: use a Secret File, not a normal env var. The backend accepts either `OPENAI_API_KEY` or `OPENAI_API_SECRET` as an environment variable or secret-file name.
 
 Secret File:
 
@@ -101,6 +101,10 @@ Normal model settings:
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
 ```
+
+## Mental health early warning analysis
+
+No additional secret is required. The frontend sends `mental_health_early_warning` with explicit consent, allowed source categories, baseline length, and current comparison windows. The backend enforces this before calling OpenAI, filters MCP connectors in `early_warning_report`, and logs only safe request metadata to Supabase.
 
 ## Google OAuth
 

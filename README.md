@@ -3,9 +3,10 @@
 PsychApp/Psyche Deep con frontend React y backend Node para:
 
 - OpenAI Responses API con herramientas MCP remotas y conectores OAuth.
-- OAuth real de Google y Microsoft con tokens cifrados en cookie HttpOnly.
+- OAuth real de Google y Microsoft con cookie de sesion pequena y tokens persistidos server-side cuando Supabase esta configurado.
 - Scraping HTTP real de perfiles publicos mediante `/psychapp/api/scrape`.
 - Analisis integrado mediante `/psychapp/api/analyze`.
+- Informe no diagnostico de alerta temprana con `mental-health-early-warning-analysis`: consentimiento explicito, fuentes minimizadas, baseline, ventanas 24h/3d/7d/30d y plan preventivo.
 - Persistencia opcional en Supabase con `supabase/migrations/202606280001_psychapp_runs.sql`.
 - Despliegue Render preparado para servir la app bajo `/psychapp`.
 
@@ -30,6 +31,17 @@ En este entorno de Codex se usa el Node incluido por la app si `node` no esta en
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` si se quiere guardar cada analisis.
+
+## Alerta temprana no diagnostica
+
+El modo por defecto del frontend es `early_warning_report`. Antes de llamar a `/psychapp/api/analyze`, la UI envia:
+
+- `mental_health_early_warning.consent_confirmed`
+- `mental_health_early_warning.allowed_sources`
+- `mental_health_early_warning.baseline_days`
+- `mental_health_early_warning.current_windows`
+
+El backend rechaza analisis de datos personales o conectados sin consentimiento confirmado. En modo alerta temprana filtra conectores MCP segun fuentes autorizadas y pide a OpenAI una salida no diagnostica con nivel Low/Moderate/High/Acute, evidencia, limitaciones y acciones de las proximas 24 horas.
 
 ## OAuth callbacks
 

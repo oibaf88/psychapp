@@ -42,6 +42,40 @@ const CONNECTORS = {
   teams: { provider: 'microsoft', connector_id: 'connector_microsoftteams', label: 'Microsoft Teams' }
 };
 
+const EARLY_WARNING_ANALYSIS_MODE = 'early_warning_report';
+const MENTAL_HEALTH_SOURCE_LABELS = {
+  calendar: 'calendar',
+  email_metadata: 'email metadata',
+  email_text: 'email text',
+  tasks: 'tasks',
+  notes: 'notes',
+  chat_history: 'chat history',
+  uploaded_files: 'uploaded files',
+  public_profiles: 'public profiles',
+  remote_mcp: 'remote MCP servers',
+  wearables: 'wearables/activity data',
+  sleep_logs: 'sleep logs',
+  location: 'location'
+};
+const CONNECTOR_MENTAL_HEALTH_SOURCES = {
+  gmail: ['email_metadata', 'email_text'],
+  outlook: ['email_metadata', 'email_text'],
+  google_calendar: ['calendar'],
+  outlook_calendar: ['calendar'],
+  google_drive: ['notes', 'uploaded_files'],
+  sharepoint: ['notes', 'uploaded_files'],
+  teams: ['chat_history']
+};
+const DEFAULT_EARLY_WARNING_WINDOWS = ['24h', '3d', '7d', '30d'];
+const HIGH_RISK_METRICS = new Set([
+  'late_night_activity',
+  'negative_language_score',
+  'substance_reference_count',
+  'missed_obligations',
+  'distinct_contacts',
+  'tasks_completed'
+]);
+
 const GOOGLE_SCOPES = readScopes('GOOGLE_SCOPES', [
   'openid',
   'email',
@@ -1374,7 +1408,7 @@ async function getMcpTools(req, body) {
   const store = await readOAuthStoreAsync(req);
   let refreshed = false;
   const providerCache = new Map();
-  const selectedConnectorIds = Array.isArray(body.connector_ids) ? body.connector_ids : [];
+  const selectedConnectorIds = effectiveConnectorIdsForBody(body);
   for (const id of selectedConnectorIds) {
     const connector = CONNECTORS[id];
     if (!connector) continue;
@@ -1422,7 +1456,7 @@ async function getMcpTools(req, body) {
     });
   }
 
-  const remoteServers = Array.isArray(body.remote_mcp_servers) ? body.remote_mcp_servers : [];
+  const remoteServers = remoteMcpServersForBody(body);
   for (const server of remoteServers) {
     const serverUrl = String(server?.server_url || server?.url || '').trim();
     if (!serverUrl.startsWith('https://')) continue;
@@ -1495,7 +1529,7 @@ async function callOpenAI(req, payload) {
 }
 
 function selectedConnectorEntries(body = {}) {
-  const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
+  const selected = effectiveConnectorIdsForBody(body);
   return selected.map(id => [id, CONNECTORS[id]]).filter(([, connector]) => connector);
 }
 
@@ -1594,14 +1628,405 @@ function collectScrapedImages(scraped = []) {
   return images;
 }
 
+function isEarlyWarningMode(body = {}) {
+  return String(body.analysis_mode || '') === EARLY_WARNING_ANALYSIS_MODE
+    || Boolean(body.mental_health_early_warning?.enabled);
+}
+
+function normalizeBoolean(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function normalizeCurrentWindows(value) {
+  const raw = Array.isArray(value) ? value : DEFAULT_EARLY_WARNING_WINDOWS;
+  const allowed = new Set(['24h', '3d', '7d', '30d']);
+  const windows = raw.map(String).filter(item => allowed.has(item));
+  return windows.length ? [...new Set(windows)] : DEFAULT_EARLY_WARNING_WINDOWS;
+}
+
+function normalizeAllowedSources(raw = {}) {
+  const out = new Set();
+  const sourceInput = raw.allowed_sources || raw.sources || raw.source_categories || [];
+  if (Array.isArray(sourceInput)) {
+    for (const item of sourceInput) {
+      const key = String(item || '').trim();
+      if (MENTAL_HEALTH_SOURCE_LABELS[key]) out.add(key);
+    }
+  } else if (sourceInput && typeof sourceInput === 'object') {
+    for (const [key, enabled] of Object.entries(sourceInput)) {
+      if (MENTAL_HEALTH_SOURCE_LABELS[key] && normalizeBoolean(enabled)) out.add(key);
+    }
+  }
+  return [...out];
+}
+
+function normalizeMentalHealthOptions(body = {}) {
+  const raw = body.mental_health_early_warning && typeof body.mental_health_early_warning === 'object'
+    ? body.mental_health_early_warning
+    : {};
+  return {
+    enabled: isEarlyWarningMode(body),
+    consent_confirmed: normalizeBoolean(raw.consent_confirmed) || normalizeBoolean(body.consent_confirmed),
+    allowed_sources: normalizeAllowedSources(raw),
+    baseline_days: Math.min(Math.max(positiveInt(raw.baseline_days, 90), 30), 365),
+    current_windows: normalizeCurrentWindows(raw.current_windows),
+    purpose: String(raw.purpose || 'non_diagnostic_early_warning').slice(0, 120)
+  };
+}
+
+function hasAnalysisData(body = {}) {
+  return Boolean(
+    String(body.central_text || body.case_text || '').trim()
+    || String(body.notes || '').trim()
+    || body.central_document
+    || (Array.isArray(body.files) && body.files.length)
+    || (Array.isArray(body.connector_ids) && body.connector_ids.length)
+    || normalizeUrlList(body.profile_urls || []).length
+    || (Array.isArray(body.remote_mcp_servers) && body.remote_mcp_servers.length)
+    || (Array.isArray(body.mcp_servers) && body.mcp_servers.length)
+  );
+}
+
+function requiresMentalHealthConsent(body = {}) {
+  return isEarlyWarningMode(body) || hasAnalysisData(body);
+}
+
+function assertMentalHealthConsent(body = {}) {
+  const options = normalizeMentalHealthOptions(body);
+  if (requiresMentalHealthConsent(body) && !options.consent_confirmed) {
+    throw Object.assign(new Error('Consentimiento explicito requerido antes de analizar datos personales o conectados.'), {
+      status: 400,
+      consent_required: true,
+      diagnostic: {
+        consent_status: 'not_confirmed',
+        source_categories: Object.keys(MENTAL_HEALTH_SOURCE_LABELS)
+      }
+    });
+  }
+  return options;
+}
+
+function sourceAllowed(options, source) {
+  return new Set(options.allowed_sources || []).has(source);
+}
+
+function connectorAllowedForMentalHealth(id, options) {
+  if (!options?.enabled) return true;
+  const requiredSources = CONNECTOR_MENTAL_HEALTH_SOURCES[id] || [];
+  if (!requiredSources.length) return false;
+  return requiredSources.some(source => sourceAllowed(options, source));
+}
+
+function effectiveConnectorIdsForBody(body = {}) {
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids.filter(id => CONNECTORS[id]) : [];
+  const options = normalizeMentalHealthOptions(body);
+  if (!options.enabled) return selected;
+  return selected.filter(id => connectorAllowedForMentalHealth(id, options));
+}
+
+function skippedConnectorIdsForBody(body = {}) {
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids.filter(id => CONNECTORS[id]) : [];
+  const effective = new Set(effectiveConnectorIdsForBody(body));
+  return selected.filter(id => !effective.has(id));
+}
+
+function profileUrlsForBody(body = {}) {
+  const urls = normalizeUrlList(body.profile_urls || []);
+  const options = normalizeMentalHealthOptions(body);
+  if (options.enabled && !sourceAllowed(options, 'public_profiles')) return [];
+  return urls;
+}
+
+function remoteMcpServersForBody(body = {}) {
+  const servers = Array.isArray(body.remote_mcp_servers)
+    ? body.remote_mcp_servers
+    : Array.isArray(body.mcp_servers)
+      ? body.mcp_servers
+      : [];
+  const options = normalizeMentalHealthOptions(body);
+  if (options.enabled && !sourceAllowed(options, 'remote_mcp')) return [];
+  return servers;
+}
+
+function mentalHealthTextEvidenceAllowed(body = {}) {
+  const options = normalizeMentalHealthOptions(body);
+  if (!options.enabled) return true;
+  return sourceAllowed(options, 'notes') || sourceAllowed(options, 'uploaded_files') || sourceAllowed(options, 'chat_history');
+}
+
+function normalizeDailyMetrics(raw) {
+  const input = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? raw : null;
+  if (!input) return null;
+  const out = {};
+
+  if (Array.isArray(input)) {
+    for (const row of input) {
+      if (!row || typeof row !== 'object') continue;
+      for (const [key, value] of Object.entries(row)) {
+        if (key === 'date') continue;
+        const number = Number(value);
+        if (!Number.isFinite(number)) continue;
+        if (!out[key]) out[key] = [];
+        out[key].push(number);
+      }
+    }
+  } else {
+    for (const [key, values] of Object.entries(input)) {
+      if (!Array.isArray(values)) continue;
+      const series = values.map(Number).filter(Number.isFinite);
+      if (series.length) out[key] = series;
+    }
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+function mean(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function stdev(values) {
+  if (values.length < 2) return 0;
+  const avg = mean(values);
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function percentile(sortedValues, percentileValue) {
+  if (!sortedValues.length) return 0;
+  if (sortedValues.length === 1) return sortedValues[0];
+  const rank = (sortedValues.length - 1) * percentileValue;
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return sortedValues[lower];
+  const weight = rank - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
+function zScoreSummary(series, threshold = 2) {
+  if (series.length < 5) return { error: 'not_enough_data', n: series.length, minimum_required: 5 };
+  const avg = mean(series);
+  const sd = stdev(series);
+  if (!sd) return { anomalies: {}, threshold, mean: avg, std: null, note: 'No variance detected.' };
+  const anomalies = {};
+  const recent_z_scores = {};
+  series.forEach((value, index) => {
+    const z = (value - avg) / sd;
+    if (Math.abs(z) > threshold) anomalies[index] = value;
+    if (index >= series.length - 14) recent_z_scores[index] = Number(z.toFixed(3));
+  });
+  return { anomalies, recent_z_scores, threshold, mean: Number(avg.toFixed(3)), std: Number(sd.toFixed(3)) };
+}
+
+function iqrSummary(series, multiplier = 1.5) {
+  if (series.length < 5) return { error: 'not_enough_data', n: series.length, minimum_required: 5 };
+  const sorted = [...series].sort((a, b) => a - b);
+  const q1 = percentile(sorted, 0.25);
+  const q3 = percentile(sorted, 0.75);
+  const iqr = q3 - q1;
+  if (!iqr) return { anomalies: {}, bounds: { lower: q1, upper: q3 }, iqr: null, note: 'No IQR variability detected.' };
+  const lower = q1 - multiplier * iqr;
+  const upper = q3 + multiplier * iqr;
+  const anomalies = {};
+  series.forEach((value, index) => {
+    if (value < lower || value > upper) anomalies[index] = value;
+  });
+  return {
+    anomalies,
+    bounds: { lower: Number(lower.toFixed(3)), upper: Number(upper.toFixed(3)) },
+    iqr: Number(iqr.toFixed(3))
+  };
+}
+
+function rollingSummary(series, window = 7, threshold = 2) {
+  if (series.length < window + 3) return { error: 'not_enough_data', n: series.length, minimum_required: window + 3 };
+  const anomalies = {};
+  const recent_deviations = {};
+  for (let index = window; index < series.length; index += 1) {
+    const prior = series.slice(index - window, index);
+    const sd = stdev(prior);
+    if (!sd) continue;
+    const z = (series[index] - mean(prior)) / sd;
+    if (Math.abs(z) > threshold) anomalies[index] = series[index];
+    if (index >= series.length - 14) recent_deviations[index] = Number(z.toFixed(3));
+  }
+  return { anomalies, recent_deviations, window, threshold };
+}
+
+function detectBehavioralAnomalies(metrics) {
+  if (!metrics) return null;
+  const metricResults = {};
+  let anomalyCount = 0;
+  let sensitiveAnomalyCount = 0;
+
+  for (const [metric, series] of Object.entries(metrics)) {
+    const clean = series.map(Number).filter(Number.isFinite);
+    if (clean.length < 5) {
+      metricResults[metric] = { error: 'not_enough_data', n: clean.length };
+      continue;
+    }
+    const result = {
+      z_score: zScoreSummary(clean),
+      iqr: iqrSummary(clean),
+      rolling: rollingSummary(clean)
+    };
+    const hasAnomaly = ['z_score', 'iqr', 'rolling'].some(method => Object.keys(result[method]?.anomalies || {}).length);
+    if (hasAnomaly) {
+      anomalyCount += 1;
+      if (HIGH_RISK_METRICS.has(metric)) sensitiveAnomalyCount += 1;
+    }
+    metricResults[metric] = result;
+  }
+
+  const riskFlag = sensitiveAnomalyCount >= 3
+    ? 'high'
+    : sensitiveAnomalyCount >= 1 || anomalyCount >= 2
+      ? 'moderate'
+      : 'low';
+
+  return {
+    metrics: metricResults,
+    summary: {
+      risk_flag: riskFlag,
+      anomaly_count: anomalyCount,
+      sensitive_anomaly_count: sensitiveAnomalyCount,
+      note: 'Behavioral risk flag only; not a diagnosis or prediction.'
+    }
+  };
+}
+
+function dailyMetricsFromBody(body = {}) {
+  const raw = body.mental_health_early_warning?.daily_metrics || body.daily_metrics || null;
+  return normalizeDailyMetrics(raw);
+}
+
+function buildMentalHealthContext(body = {}, scraped = []) {
+  const options = normalizeMentalHealthOptions(body);
+  const selected = Array.isArray(body.connector_ids) ? body.connector_ids.filter(id => CONNECTORS[id]) : [];
+  const effective = effectiveConnectorIdsForBody(body);
+  const skipped = skippedConnectorIdsForBody(body);
+  const metricInput = dailyMetricsFromBody(body);
+  return {
+    skill: 'mental-health-early-warning-analysis',
+    enabled: options.enabled,
+    consent_status: options.consent_confirmed ? 'confirmed' : 'not_confirmed',
+    purpose: options.purpose,
+    non_diagnostic: true,
+    allowed_sources: options.allowed_sources.map(source => ({
+      id: source,
+      label: MENTAL_HEALTH_SOURCE_LABELS[source] || source
+    })),
+    baseline_window_days: options.baseline_days,
+    current_windows: options.current_windows,
+    source_policy: {
+      minimize_data: true,
+      prefer_aggregates: true,
+      email_text_allowed: sourceAllowed(options, 'email_text'),
+      notes_text_allowed: sourceAllowed(options, 'notes'),
+      chat_history_allowed: sourceAllowed(options, 'chat_history'),
+      uploaded_files_allowed: sourceAllowed(options, 'uploaded_files'),
+      public_profiles_allowed: sourceAllowed(options, 'public_profiles'),
+      location_allowed: sourceAllowed(options, 'location'),
+      wearables_allowed: sourceAllowed(options, 'wearables'),
+      sleep_logs_allowed: sourceAllowed(options, 'sleep_logs')
+    },
+    connectors: {
+      requested: selected,
+      effective,
+      skipped_due_to_consent: skipped,
+      tool_use_rules: effective.map(id => ({
+        id,
+        label: CONNECTORS[id].label,
+        allowed_source_categories: CONNECTOR_MENTAL_HEALTH_SOURCES[id] || [],
+        raw_text_allowed: ['gmail', 'outlook'].includes(id)
+          ? sourceAllowed(options, 'email_text')
+          : id === 'teams'
+            ? sourceAllowed(options, 'chat_history')
+            : ['google_drive', 'sharepoint'].includes(id)
+              ? sourceAllowed(options, 'notes') || sourceAllowed(options, 'uploaded_files')
+              : false
+      }))
+    },
+    public_profiles_used: profileUrlsForBody(body).length,
+    scraped_count: Array.isArray(scraped) ? scraped.length : 0,
+    deterministic_anomaly_summary: detectBehavioralAnomalies(metricInput)
+  };
+}
+
+function mentalHealthInstructions(body = {}) {
+  if (!isEarlyWarningMode(body)) {
+    return [
+      'PsychApp mental-health safety boundary:',
+      '- Treat psychological outputs as non-diagnostic reflection support, not clinical care.',
+      '- Do not claim certainty, make diagnoses, or predict relapse/crisis as fact.',
+      '- Avoid employment, insurance, legal, or clinical-access decisions.',
+      '- When using connected data, minimize private content and summarize aggregate patterns where possible.',
+      '- If acute danger appears, stop ordinary analysis and give direct crisis guidance.'
+    ].join('\n');
+  }
+
+  return [
+    'MENTAL HEALTH EARLY WARNING ANALYSIS SKILL ACTIVE.',
+    'Scope: consent-based, user-facing early warning analysis of behavioral deviations. This is not diagnosis, treatment, or a replacement for professional care.',
+    'Hard boundaries: never diagnose mental disorders or substance-use relapse; never claim a definite relapse or crisis prediction; never analyze third parties without consent; never expose raw private content when aggregate metrics are enough.',
+    'Consent and minimization: use only the source categories marked allowed in the JSON context. Prefer counts, timestamps, completion rates, contact diversity, routine proxies, and aggregated language signals. Email text, notes, chat history, wearables, sleep logs, and location require explicit source permission.',
+    'Baseline: build a user-specific baseline from the requested historical window, preferring 90 days or longer when available and 30 days as the minimum. Compare current 24h, 3d, 7d, and 30d windows when possible.',
+    'Methods: use rolling averages, z-scores, IQR outliers, and sequence patterns when numeric data supports it. Important patterns include routine disruption followed by isolation, isolation followed by task collapse, negative language plus late-night activity, substance references plus reduced routine, and missed appointments plus reduced social engagement.',
+    'Risk flag rubric: Low means minor deviations; Moderate means meaningful sustained deviations; High means multiple convergent deviations involving sleep/routine, isolation, negative or hopeless language, substance cues, missed obligations, or loss of routine; Acute means imminent danger and must stop ordinary analytics.',
+    'For Acute risk: encourage immediate human contact, emergency services if danger is imminent, clinical team contact if available, moving away from means/substances/hazards, and staying engaged. If the user is in Spain mention 112 for emergency danger and 024 for suicidal thoughts or crisis containment.',
+    'Output in Spanish with this markdown structure: ## Mental Health Early Warning Report; Consent status; Data sources analyzed; Time window; Baseline window; Overall risk flag Low/Moderate/High/Acute; Confidence; Main changes detected; Evidence chain; Protective factors still present; Possible vulnerability pattern; Recommended next 24 hours; When to escalate.',
+    'Use language such as possible increased risk, behavioral deviation, early warning signal, and risk flag. Avoid diagnosis, definite relapse, you are relapsing, or the model predicts.'
+  ].join('\n');
+}
+
+function acuteRiskDetected(body = {}) {
+  const text = [
+    body.central_text,
+    body.case_text,
+    body.notes,
+    body.input,
+    body.prompt,
+    ...(Array.isArray(body.messages) ? body.messages.map(message => message?.content || '') : []),
+    ...(Array.isArray(body.files) ? body.files.map(file => file?.text || '') : [])
+  ].join('\n').toLowerCase();
+  if (!text.trim()) return false;
+  return /\b(me voy a suicidar|quiero suicidarme|plan para suicid|me voy a matar|quiero matarme|no puedo mantenerme a salvo|no puedo estar a salvo|self[-\s]?harm plan|suicide plan|kill myself|cannot stay safe|overdose tonight|sobredosis hoy|violencia inminente)\b/i.test(text);
+}
+
+function acuteRiskGuidance() {
+  return [
+    '## Mental Health Early Warning Report',
+    '',
+    '**Consent status:** Confirmed',
+    '**Overall risk flag:** Acute',
+    '**Confidence:** Medium',
+    '',
+    'Hay una senal de posible peligro inmediato. No voy a continuar con analisis ordinario de datos.',
+    '',
+    '### Recommended next 24 hours',
+    '',
+    '1. Contacta ahora con una persona de confianza y dile que necesitas acompanamiento inmediato.',
+    '2. Si hay peligro inminente, llama a emergencias. En Espana, llama al 112.',
+    '3. Si aparecen pensamientos suicidas o necesitas contencion de crisis en Espana, llama al 024.',
+    '4. Alejate de medios, sustancias u otros riesgos inmediatos mientras contactas con ayuda humana.',
+    '5. Si tienes equipo clinico, contactalo ahora o acude a urgencias.',
+    '',
+    '### When to escalate',
+    '',
+    'Escala inmediatamente si no puedes mantenerte a salvo, hay un plan concreto, intoxicacion severa, abstinencia peligrosa, psicosis, violencia inminente o peligro medico.'
+  ].join('\n');
+}
+
 function buildAnalysisPrompt(req, body, scraped, tools = []) {
   const files = Array.isArray(body.files) ? body.files : [];
-  const notes = String(body.notes || '').trim();
-  const centralText = String(body.central_text || body.case_text || '').trim();
+  const includeTextEvidence = mentalHealthTextEvidenceAllowed(body);
+  const notes = includeTextEvidence ? String(body.notes || '').trim() : '';
+  const centralText = includeTextEvidence ? String(body.central_text || body.case_text || '').trim() : '';
   const centralDocument = body.central_document && typeof body.central_document === 'object' ? body.central_document : null;
   const analysisMode = String(body.analysis_mode || 'case_formulation');
   const selected = Array.isArray(body.connector_ids) ? body.connector_ids : [];
-  const allFiles = centralDocument ? [centralDocument, ...files] : files;
+  const mentalHealthContext = buildMentalHealthContext(body, scraped);
+  const allFiles = includeTextEvidence ? (centralDocument ? [centralDocument, ...files] : files) : [];
   const textFiles = allFiles.filter(file => !isImageFile(file) && !isDocumentFile(file));
   const imageFiles = allFiles.filter(isImageFile).slice(0, MAX_UPLOADED_IMAGES_FOR_VISION);
   const documentFiles = allFiles.filter(isDocumentFile).slice(0, MAX_UPLOADED_DOCUMENTS_FOR_MODEL);
@@ -1623,19 +2048,24 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
     {
       type: 'input_text',
       text: JSON.stringify({
-        task: 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados, imagenes subidas y perfiles publicos scrapeados.',
+        task: isEarlyWarningMode(body)
+          ? 'Crear un informe no diagnostico de alerta temprana de cambios conductuales con consentimiento, datos minimizados y recomendaciones preventivas.'
+          : 'Analizar patrones personales a partir de fuentes conectadas, archivos exportados, imagenes subidas y perfiles publicos scrapeados.',
         analysis_mode: analysisMode,
+        mental_health_early_warning: mentalHealthContext,
         central_text: centralText.slice(0, 90000),
-        central_document: centralDocument ? {
+        central_document: includeTextEvidence && centralDocument ? {
           name: String(centralDocument.name || ''),
           type: String(centralDocument.type || ''),
           size: Number(centralDocument.size || 0),
           kind: String(centralDocument.kind || ''),
-          text_preview: String(centralDocument.text || '').slice(0, 30000),
-          attached_to_model: Boolean(centralDocument.data_url || centralDocument.file_data)
+          text_preview: includeTextEvidence ? String(centralDocument.text || '').slice(0, 30000) : '',
+          attached_to_model: includeTextEvidence && Boolean(centralDocument.data_url || centralDocument.file_data)
         } : null,
         notes,
         selected_connectors: selected,
+        effective_connectors: effectiveConnectorIdsForBody(body),
+        skipped_connectors_due_to_consent: skippedConnectorIdsForBody(body),
         files: fileSummaries,
         attached_documents: documentFiles.map(file => ({
           name: String(file.name || 'documento'),
@@ -1650,7 +2080,9 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
           context: image.context,
           source_url: image.source_url
         })),
-        scraped_profiles: compactScrapedProfiles(scraped)
+        scraped_profiles: sourceAllowed(normalizeMentalHealthOptions(body), 'public_profiles') || !isEarlyWarningMode(body)
+          ? compactScrapedProfiles(scraped)
+          : []
       }, null, 2)
     }
   ];
@@ -1676,6 +2108,7 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
   return {
     model: body.model || DEFAULT_MODEL,
     instructions: [
+      mentalHealthInstructions(body),
       'Eres PsychApp, una herramienta de apoyo para reflexión psicológica estructurada.',
       'No diagnostiques ni sustituyas evaluacion clinica. Senala incertidumbre, limites, contraevidencia y riesgos. Si hay pocos datos, aun asi formula hipotesis utiles, pero graduadas por confianza.',
       'El documento central o texto pegado tiene maxima prioridad. Usa notas, adjuntos, conectores y scraping como evidencia auxiliar o contraste.',
@@ -1685,7 +2118,9 @@ function buildAnalysisPrompt(req, body, scraped, tools = []) {
       'Cuando el modo sea clinical_report, entrega informe clinico no diagnostico: motivo, fuentes, hallazgos, formulacion, riesgos, limitaciones y proximos pasos.',
       'Describe imagenes subidas y publicas sin identificar personas ni inferir atributos sensibles. Centrate en escena, objetos, actividad, texto visible, tono visual y limites de confianza.',
       'El scraping debe resumir temas tratados, relatos recurrentes, senales temporales, hashtags, enlaces relevantes, contenido visual y evidencias por URL; no te limites a contar posts o metadatos.',
-      'Devuelve en espanol con secciones: resumen ejecutivo, fuentes usadas, evidencia central, temas y patrones, analisis de personalidad/formulacion, hipotesis con confianza, contraevidencias, preguntas clinicas utiles, proximos pasos y limites.'
+      isEarlyWarningMode(body)
+        ? 'Devuelve en espanol solo con la plantilla Mental Health Early Warning Report definida por el skill, sin secciones de personalidad ni formulacion clinica.'
+        : 'Devuelve en espanol con secciones: resumen ejecutivo, fuentes usadas, evidencia central, temas y patrones, analisis de personalidad/formulacion, hipotesis con confianza, contraevidencias, preguntas clinicas utiles, proximos pasos y limites.'
     ].join('\n'),
     input: [
       {
@@ -1719,13 +2154,23 @@ function safeMetadataValue(value, depth = 0) {
 function analysisRequestMeta(body = {}, scraped = []) {
   const files = Array.isArray(body.files) ? body.files : [];
   const selected = Array.isArray(body.connector_ids) ? body.connector_ids.filter(id => CONNECTORS[id]) : [];
-  const profileUrls = normalizeUrlList(body.profile_urls || []);
+  const effective = effectiveConnectorIdsForBody(body);
+  const options = normalizeMentalHealthOptions(body);
+  const profileUrls = profileUrlsForBody(body);
   const centralDocument = body.central_document && typeof body.central_document === 'object' ? body.central_document : null;
   const scrapedImages = collectScrapedImages(Array.isArray(scraped) ? scraped : []);
   return {
     analysis_mode: String(body.analysis_mode || 'case_formulation'),
     connector_ids: selected,
-    connector_count: selected.length,
+    effective_connector_ids: effective,
+    skipped_connector_ids: skippedConnectorIdsForBody(body),
+    connector_count: effective.length,
+    consent_required: requiresMentalHealthConsent(body),
+    consent_confirmed: options.consent_confirmed,
+    mental_health_early_warning: options.enabled,
+    mental_health_allowed_sources: options.allowed_sources,
+    baseline_days: options.baseline_days,
+    current_windows: options.current_windows,
     notes_present: Boolean(String(body.notes || '').trim()),
     notes_chars: String(body.notes || '').length,
     central_text_present: Boolean(String(body.central_text || body.case_text || '').trim()),
@@ -1820,6 +2265,7 @@ function analysisErrorMeta(error = {}) {
     oauth_provider: error.oauth_provider || '',
     oauth_reason: error.oauth_reason || '',
     oauth_diagnostic: error.diagnostic || null,
+    consent_required: Boolean(error.consent_required),
     openai_error_code: error.upstream?.error?.code || '',
     openai_error_type: error.upstream?.error?.type || '',
     openai_status: error.upstream?.error?.status || error.upstream?.status || null
@@ -1831,7 +2277,32 @@ async function handleAnalyze(req, res) {
   const requestId = randomUrlSafe(10);
   try {
     body = await readJsonBody(req);
-    const profileUrls = normalizeUrlList(body.profile_urls || []);
+    const mentalHealthOptions = assertMentalHealthConsent(body);
+    if (acuteRiskDetected(body)) {
+      const output_text = acuteRiskGuidance();
+      await logPsychappEvent(req, 'psychapp.analyze.acute_guidance', {
+        request_id: requestId,
+        route: '/api/analyze',
+        ...analysisRequestMeta(body, []),
+        mental_health: {
+          consent_status: mentalHealthOptions.consent_confirmed ? 'confirmed' : 'not_confirmed',
+          early_warning: isEarlyWarningMode(body),
+          acute_guidance: true
+        }
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        provider: 'psychapp-safety',
+        model: 'deterministic-crisis-guidance',
+        output_text,
+        scraped: [],
+        mental_health: buildMentalHealthContext(body, []),
+        saved: { ok: false, skipped: true, reason: 'acute_guidance_not_stored' },
+        raw_id: null,
+        raw_status: 'acute_guidance'
+      });
+    }
+    const profileUrls = profileUrlsForBody(body);
     const scraped = [];
     for (const url of profileUrls.slice(0, 12)) scraped.push(await scrapeOne(url));
     await logPsychappEvent(req, 'psychapp.analyze.started', {
@@ -1862,6 +2333,7 @@ async function handleAnalyze(req, res) {
       model: payload.model,
       output_text,
       scraped,
+      mental_health: buildMentalHealthContext(body, scraped),
       saved: save,
       raw_id: openai.id || null,
       raw_status: openai.status || null
@@ -1884,6 +2356,7 @@ async function handleAnalyze(req, res) {
         oauth_url: normalizedError.oauth_url,
         oauth_reason: normalizedError.oauth_reason,
         oauth_status: normalizedError.oauth_status,
+        consent_required: Boolean(normalizedError.consent_required),
         diagnostic: normalizedError.diagnostic,
         upstream: normalizedError.upstream
       }
@@ -1895,12 +2368,25 @@ async function handleMessages(req, res) {
   let body = {};
   try {
     body = await readJsonBody(req);
+    const mentalHealthOptions = requiresMentalHealthConsent(body) ? assertMentalHealthConsent(body) : normalizeMentalHealthOptions(body);
+    if (acuteRiskDetected(body)) {
+      return sendJson(res, 200, {
+        content: [{ type: 'text', text: acuteRiskGuidance() }],
+        provider: 'psychapp-safety',
+        raw_id: null,
+        raw_status: 'acute_guidance'
+      });
+    }
     const input = Array.isArray(body.messages)
       ? body.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }))
       : [{ role: 'user', content: String(body.input || body.prompt || '') }];
+    const instructions = [
+      requiresMentalHealthConsent(body) || mentalHealthOptions.enabled ? mentalHealthInstructions(body) : '',
+      body.system || ''
+    ].filter(Boolean).join('\n\n');
     const payload = {
       model: body.model || DEFAULT_MODEL,
-      instructions: body.system || undefined,
+      instructions: instructions || undefined,
       input,
       tools: [],
       max_output_tokens: positiveInt(body.max_output_tokens || body.max_tokens, 1800),
@@ -1926,6 +2412,7 @@ async function handleMessages(req, res) {
         oauth_url: normalizedError.oauth_url,
         oauth_reason: normalizedError.oauth_reason,
         oauth_status: normalizedError.oauth_status,
+        consent_required: Boolean(normalizedError.consent_required),
         diagnostic: normalizedError.diagnostic,
         upstream: normalizedError.upstream
       }
@@ -1942,10 +2429,16 @@ async function saveAnalysisRun({ req, body, scraped, openai, output_text }) {
       central_document_present: Boolean(body.central_document),
       analysis_mode: body.analysis_mode || 'case_formulation',
       connector_ids: Array.isArray(body.connector_ids) ? body.connector_ids : [],
+      effective_connector_ids: effectiveConnectorIdsForBody(body),
+      skipped_connector_ids: skippedConnectorIdsForBody(body),
+      consent_required: requiresMentalHealthConsent(body),
+      consent_confirmed: normalizeMentalHealthOptions(body).consent_confirmed,
+      mental_health_early_warning: isEarlyWarningMode(body),
+      mental_health_allowed_sources: normalizeMentalHealthOptions(body).allowed_sources,
       file_count: Array.isArray(body.files) ? body.files.length : 0,
       image_file_count: Array.isArray(body.files) ? body.files.filter(isImageFile).length : 0,
       text_file_count: Array.isArray(body.files) ? body.files.filter(file => !isImageFile(file)).length : 0,
-      profile_urls: normalizeUrlList(body.profile_urls || [])
+      profile_urls: profileUrlsForBody(body)
     },
     scraped,
     result: {
@@ -1975,6 +2468,12 @@ function healthDiagnostics(req = null) {
       key_present: Boolean(keyInfo.value),
       model: DEFAULT_MODEL,
       timeout_ms: OPENAI_TIMEOUT_MS
+    },
+    mental_health: {
+      skill: 'mental-health-early-warning-analysis',
+      early_warning_mode: EARLY_WARNING_ANALYSIS_MODE,
+      consent_gate: true,
+      output: 'non_diagnostic_early_warning_report'
     },
     oauth: {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
@@ -2010,6 +2509,12 @@ function publicDiagnostics(req = null) {
       model: DEFAULT_MODEL,
       url: OPENAI_URL,
       store: process.env.OPENAI_STORE === 'true'
+    },
+    mental_health: {
+      skill: 'mental-health-early-warning-analysis',
+      early_warning_mode: EARLY_WARNING_ANALYSIS_MODE,
+      source_categories: MENTAL_HEALTH_SOURCE_LABELS,
+      consent_gate: true
     },
     oauth: {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),

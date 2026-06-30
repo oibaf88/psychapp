@@ -116,7 +116,8 @@ https://psychapp.bfab.io/mcp
 psychapp_status
 psychapp_analyze_text_sample
 psychapp_plan_data_sources
+psychapp_plan_early_warning_report
 psychapp_record_analysis_snapshot
 ```
 
-These tools are intentionally conservative. They do not expose Gmail, Drive or raw clinical data directly. Sensitive connectors should be added only after consent, audit, deletion and least-privilege policies are explicit.
+These tools are intentionally conservative. They do not expose Gmail, Drive or raw clinical data directly. The early-warning planner mirrors the app API contract: explicit consent, source-specific permissions, baseline/current windows, non-diagnostic risk flags, and no raw sensitive content unless a source is specifically allowed.

@@ -415,6 +415,7 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
       if (toolName === 'psychapp_status') return toolContent(statusPayload(req, tokenPayload));
       if (toolName === 'psychapp_analyze_text_sample') return toolContent(analyzeTextSample(args));
       if (toolName === 'psychapp_plan_data_sources') return toolContent(planDataSources(args));
+      if (toolName === 'psychapp_plan_early_warning_report') return toolContent(planEarlyWarningReport(args));
       if (toolName === 'psychapp_record_analysis_snapshot') return toolContent(await recordSnapshot(tokenPayload, args));
       return toolContent({ ok: false, error: `Unknown tool: ${toolName}` }, true);
     } catch (err) {
@@ -433,7 +434,7 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
       tools: MCP_TOOLS.map(t => ({ name: t.name, description: t.description })),
       openai_backend_key_present: Boolean(diagnostics?.openai?.key_present),
       supabase_optional_audit_enabled: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
-      privacy: 'Do not send raw sensitive clinical or personal data unless the user explicitly requests analysis and understands that ChatGPT will call this external MCP server.'
+      privacy: 'Use explicit consent, source-specific permissions and metadata-minimized inputs for mental-health early warning analysis. Do not send raw sensitive clinical or personal data unless the user explicitly allows that source.'
     };
   }
 
@@ -484,6 +485,62 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
         suggested_mode: /gmail|drive|calendar/i.test(source) ? 'OAuth connector or exported subset' : 'user-uploaded export',
         privacy_note: 'Use least-privilege and avoid raw secrets/tokens in prompts.'
       }))
+    };
+  }
+
+  function planEarlyWarningReport(args = {}) {
+    const allowedSourceCategories = [
+      'calendar',
+      'email_metadata',
+      'email_text',
+      'tasks',
+      'notes',
+      'chat_history',
+      'uploaded_files',
+      'public_profiles',
+      'remote_mcp',
+      'wearables',
+      'sleep_logs',
+      'location'
+    ];
+    const sources = Array.isArray(args.sources)
+      ? args.sources.map(String).filter(source => allowedSourceCategories.includes(source))
+      : ['calendar', 'email_metadata', 'tasks'];
+    const baselineDays = Math.min(Math.max(Number.parseInt(args.baseline_days || 90, 10) || 90, 30), 365);
+    return {
+      ok: true,
+      type: 'mental_health_early_warning_plan',
+      non_diagnostic: true,
+      consent_gate: {
+        required: true,
+        statement: 'Confirm explicit user consent before reading connected data; email text, notes, chat history, health/activity data and location require source-specific permission.'
+      },
+      recommended_payload: {
+        analysis_mode: 'early_warning_report',
+        mental_health_early_warning: {
+          enabled: true,
+          consent_confirmed: true,
+          allowed_sources: sources,
+          baseline_days: baselineDays,
+          current_windows: ['24h', '3d', '7d', '30d']
+        }
+      },
+      source_categories: allowedSourceCategories,
+      output_sections: [
+        'Consent status',
+        'Data sources analyzed',
+        'Time window',
+        'Baseline window',
+        'Overall risk flag',
+        'Confidence',
+        'Main changes detected',
+        'Evidence chain',
+        'Protective factors still present',
+        'Possible vulnerability pattern',
+        'Recommended next 24 hours',
+        'When to escalate'
+      ],
+      safety: 'Risk flags are Low/Moderate/High/Acute behavioral flags, not diagnoses or crisis predictions.'
     };
   }
 
@@ -671,6 +728,20 @@ const MCP_TOOLS = [
       type: 'object',
       properties: {
         goal: { type: 'string' },
+        sources: { type: 'array', items: { type: 'string' } }
+      },
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+  },
+  {
+    name: 'psychapp_plan_early_warning_report',
+    title: 'Plan early warning report',
+    description: 'Create a consent-based, non-diagnostic early-warning report plan with source categories, baseline window and comparison windows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseline_days: { type: 'number', minimum: 30, maximum: 365 },
         sources: { type: 'array', items: { type: 'string' } }
       },
       additionalProperties: false
