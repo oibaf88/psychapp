@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { createPsychAppMcpOAuthHandler } from './psychapp-mcp-oauth.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -31,6 +32,7 @@ const OAUTH_SESSION_COOKIE = 'psychapp_oauth_sid';
 const STATE_COOKIE = 'psychapp_oauth_state';
 const OAUTH_COOKIE_TTL_SECONDS = positiveInt(process.env.OAUTH_COOKIE_TTL_SECONDS, 60 * 60 * 24 * 7);
 const MICROSOFT_TENANT = process.env.MICROSOFT_TENANT || 'common';
+const ALLOW_CUSTOM_OAUTH_SCOPES = truthy(process.env.ALLOW_CUSTOM_OAUTH_SCOPES);
 
 const CONNECTORS = {
   gmail: { provider: 'google', connector_id: 'connector_gmail', label: 'Gmail' },
@@ -80,9 +82,9 @@ const GOOGLE_SCOPES = readScopes('GOOGLE_SCOPES', [
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/calendar.events'
+  'https://www.googleapis.com/auth/calendar.events.readonly'
 ]);
 
 const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
@@ -93,16 +95,13 @@ const MICROSOFT_SCOPES = readScopes('MICROSOFT_SCOPES', [
   'User.Read',
   'Mail.Read',
   'Files.Read.All',
-  'Sites.Read.All',
-  'Calendars.Read',
-  'Chat.Read',
-  'ChannelMessage.Read.All'
+  'Calendars.Read'
 ]);
 
 const CONNECTOR_SCOPE_REQUIREMENTS = {
-  gmail: ['userinfo.email', 'userinfo.profile', 'gmail.modify'],
+  gmail: ['userinfo.email', 'userinfo.profile', 'gmail.readonly'],
   google_drive: ['userinfo.email', 'userinfo.profile', 'drive.readonly'],
-  google_calendar: ['userinfo.email', 'userinfo.profile', 'calendar.events'],
+  google_calendar: ['userinfo.email', 'userinfo.profile', 'calendar.events.readonly'],
   outlook: ['User.Read', 'Mail.Read'],
   outlook_calendar: ['User.Read', 'Calendars.Read'],
   sharepoint: ['User.Read', 'Files.Read.All', 'Sites.Read.All'],
@@ -158,6 +157,10 @@ function positiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function truthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
 function normalizeBasePath(value) {
   const clean = String(value || '').trim();
   if (!clean || clean === '/') return '';
@@ -166,6 +169,7 @@ function normalizeBasePath(value) {
 
 function readScopes(name, fallback) {
   const raw = String(process.env[name] || '').trim();
+  if (raw && !ALLOW_CUSTOM_OAUTH_SCOPES) return fallback;
   if (!raw) return fallback;
   const scopes = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
   return scopes.length ? scopes : fallback;
@@ -179,6 +183,10 @@ function scopeAliases(scope) {
     .replace(/^https:\/\/graph\.microsoft\.com\//i, '')
     .replace(/^https:\/\/www\.googleapis\.com\/auth\/userinfo\./i, 'userinfo.');
   const aliases = new Set([value, short]);
+  const addGoogleScope = name => {
+    aliases.add(name);
+    aliases.add(`https://www.googleapis.com/auth/${name}`);
+  };
 
   if (value === 'email' || short === 'email') aliases.add('userinfo.email');
   if (value === 'profile' || short === 'profile') aliases.add('userinfo.profile');
@@ -190,8 +198,18 @@ function scopeAliases(scope) {
     aliases.add('profile');
     aliases.add('https://www.googleapis.com/auth/userinfo.profile');
   }
-  for (const googleScope of ['gmail.modify', 'gmail.readonly', 'drive.readonly', 'calendar.events', 'calendar.readonly']) {
-    if (value === googleScope || short === googleScope) aliases.add(`https://www.googleapis.com/auth/${googleScope}`);
+  for (const googleScope of ['gmail.modify', 'gmail.readonly', 'gmail.metadata', 'drive.readonly', 'calendar.events', 'calendar.events.readonly', 'calendar.readonly']) {
+    if (value === googleScope || short === googleScope) addGoogleScope(googleScope);
+  }
+  if (short === 'gmail.modify') {
+    addGoogleScope('gmail.readonly');
+    addGoogleScope('gmail.metadata');
+  }
+  if (short === 'gmail.readonly') addGoogleScope('gmail.metadata');
+  if (short === 'calendar.events') addGoogleScope('calendar.events.readonly');
+  if (short === 'calendar.readonly') addGoogleScope('calendar.events.readonly');
+  if (short === 'drive') {
+    addGoogleScope('drive.readonly');
   }
   for (const microsoftScope of ['User.Read', 'Mail.Read', 'Files.Read.All', 'Sites.Read.All', 'Calendars.Read', 'Chat.Read', 'ChannelMessage.Read.All']) {
     if (value === microsoftScope || short === microsoftScope) aliases.add(`https://graph.microsoft.com/${microsoftScope}`);
@@ -2478,6 +2496,7 @@ function healthDiagnostics(req = null) {
     oauth: {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
       microsoft_tenant: MICROSOFT_TENANT,
+      allow_custom_oauth_scopes: ALLOW_CUSTOM_OAUTH_SCOPES,
       config: req ? publicOAuthConfig(req) : {}
     },
     supabase: {
@@ -2519,6 +2538,7 @@ function publicDiagnostics(req = null) {
     oauth: {
       cookie_secret_present: Boolean(findSecret(['OAUTH_COOKIE_SECRET', 'SESSION_SECRET', 'COOKIE_SECRET', 'PSYCHAPP_COOKIE_SECRET']).value),
       microsoft_tenant: MICROSOFT_TENANT,
+      allow_custom_oauth_scopes: ALLOW_CUSTOM_OAUTH_SCOPES,
       providers: {
         google: publicTokenMeta(store.providers?.google, 'google'),
         microsoft: publicTokenMeta(store.providers?.microsoft, 'microsoft')
@@ -2570,6 +2590,15 @@ function routePath(req) {
   return { url, pathname: stripBase(url.pathname) };
 }
 
+const psychAppMcpOAuth = createPsychAppMcpOAuthHandler({
+  sendJson,
+  sendHtml,
+  readBody,
+  absoluteBaseUrl,
+  publicDiagnostics,
+  getOpenAIKeyWithMeta
+});
+
 function serveStatic(req, res, originalPathname, strippedPathname) {
   if (!APP_BASE_PATH && originalPathname === '/') return serveFile(res, path.join(DIST, 'index.html'));
   if (APP_BASE_PATH && originalPathname === '/') return serveFile(res, path.join(DIST, 'index.html'));
@@ -2614,6 +2643,8 @@ function mime(filePath) {
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return sendJson(res, 204, {});
   const { url, pathname } = routePath(req);
+
+  if (psychAppMcpOAuth(req, res, pathname)) return;
 
   if (pathname === '/api/health') return sendJson(res, 200, healthDiagnostics(req));
   if (pathname === '/api/debug/config') return sendJson(res, 200, publicDiagnostics(req));

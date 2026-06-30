@@ -10,6 +10,8 @@ Use this URL when creating the connector in ChatGPT developer mode:
 https://psychapp.bfab.io/mcp
 ```
 
+This endpoint is hosted by Render. There is no additional Render-to-OpenAI connector to create inside Render; ChatGPT/OpenAI is configured to call this public HTTPS MCP endpoint.
+
 ## Required public endpoints
 
 The server exposes:
@@ -109,6 +111,8 @@ https://psychapp.bfab.io/mcp
 
 7. During OAuth, enter `PSYCHAPP_MCP_OWNER_PIN` and authorize.
 8. Refresh connector metadata if tools do not appear immediately.
+
+If ChatGPT receives the React app HTML or a 404 instead of MCP/OAuth metadata, the deployed Render service is not serving the latest server routes. Confirm that `/api/mcp/debug` reports the same `mcp_endpoint` shown above.
 
 ## Tools currently exposed
 

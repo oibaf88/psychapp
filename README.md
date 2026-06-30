@@ -10,6 +10,8 @@ PsychApp/Psyche Deep con frontend React y backend Node para:
 - Persistencia opcional en Supabase con `supabase/migrations/202606280001_psychapp_runs.sql`.
 - Despliegue Render preparado para servir la app bajo `/psychapp`.
 
+La guia operativa para el conector ChatGPT MCP y los permisos OAuth de Google/Microsoft esta en `README_CONNECTORS_AND_PERMISSIONS.md`.
+
 ## Desarrollo
 
 ```powershell

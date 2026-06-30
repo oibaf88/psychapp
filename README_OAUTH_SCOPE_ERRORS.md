@@ -94,17 +94,18 @@ For Microsoft 365 organizational accounts only, you may later add:
 
 ```text
 Sites.Read.All
-Team.ReadBasic.All
+Chat.Read
+ChannelMessage.Read.All
 ```
 
-Do not add these first when debugging Outlook/Hotmail personal accounts. Start with the smaller personal-account scope set above.
+Do not add these first when debugging Outlook/Hotmail personal accounts. Start with the smaller personal-account scope set above. Organization-only scopes require `ALLOW_CUSTOM_OAUTH_SCOPES=true`, an explicit `MICROSOFT_SCOPES` value in Render, and tenant admin consent.
 
 ## Google scope string
 
 For Google OAuth credentials, use:
 
 ```text
-openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.readonly
+openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.events.readonly
 ```
 
 Google redirect URI:

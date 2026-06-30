@@ -134,7 +134,7 @@ email
 profile
 https://www.googleapis.com/auth/gmail.readonly
 https://www.googleapis.com/auth/drive.readonly
-https://www.googleapis.com/auth/calendar.readonly
+https://www.googleapis.com/auth/calendar.events.readonly
 ```
 
 Google redirect URI to register in Google Cloud Console:
@@ -198,10 +198,11 @@ Do not add SharePoint or Teams while debugging personal accounts:
 
 ```text
 Sites.Read.All
-Team.ReadBasic.All
+Chat.Read
+ChannelMessage.Read.All
 ```
 
-Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams.
+Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams. They require `ALLOW_CUSTOM_OAUTH_SCOPES=true`, an explicit `MICROSOFT_SCOPES` value, and tenant admin consent.
 
 ## Supabase server-side persistence
 
@@ -251,7 +252,7 @@ GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 ```
 
 Plus Render Secret File:

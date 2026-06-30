@@ -36,7 +36,7 @@ Use these exact URLs in Render, Google Cloud Console, and Microsoft Entra.
      - `profile`
      - `https://www.googleapis.com/auth/gmail.readonly`
      - `https://www.googleapis.com/auth/drive.readonly`
-     - `https://www.googleapis.com/auth/calendar.readonly`
+     - `https://www.googleapis.com/auth/calendar.events.readonly`
    - Test users: add your own Gmail address while the app is in Testing mode.
    - Save and continue through all steps.
 5. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**.
@@ -96,7 +96,7 @@ https://psychapp.bfab.io/api/oauth/callback/microsoft
    - `Files.Read.All`
    - `Calendars.Read`
 
-Do not add `Sites.Read.All` or `Team.ReadBasic.All` until the personal Outlook/Hotmail flow is stable.
+Do not add `Sites.Read.All`, `Chat.Read`, or `ChannelMessage.Read.All` until the personal Outlook/Hotmail flow is stable. Use them only for Microsoft 365 organization accounts with tenant admin consent.
 
 ### Microsoft endpoints for personal accounts
 
@@ -117,7 +117,7 @@ https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuratio
 ### Environment variables to add in Render
 
 ```env
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
@@ -143,7 +143,7 @@ ALLOW_CUSTOM_OAUTH_SCOPES=false
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft

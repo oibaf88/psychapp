@@ -97,7 +97,7 @@ email
 profile
 https://www.googleapis.com/auth/gmail.readonly
 https://www.googleapis.com/auth/drive.readonly
-https://www.googleapis.com/auth/calendar.readonly
+https://www.googleapis.com/auth/calendar.events.readonly
 ```
 
 Google must be configured with a consent screen and the needed sensitive scopes. While testing, add your own Google account as a test user if the OAuth app is still in testing mode.
@@ -113,13 +113,13 @@ https://psychapp.bfab.io/api/oauth/callback/microsoft
 Render variables:
 
 ```env
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
-Microsoft scopes requested by the app for personal Outlook/Hotmail/Live accounts:
+Microsoft scopes requested by the app by default for personal Outlook/Hotmail/Live accounts and basic work/school mail/files/calendar:
 
 ```text
 openid
@@ -132,7 +132,7 @@ Files.Read.All
 Calendars.Read
 ```
 
-Do not add `Sites.Read.All` or `Team.ReadBasic.All` while debugging personal Microsoft accounts.
+Do not add `Sites.Read.All`, `Chat.Read`, or `ChannelMessage.Read.All` while debugging personal Microsoft accounts. Add them only for Microsoft 365 organization accounts, with tenant admin consent, by setting `ALLOW_CUSTOM_OAUTH_SCOPES=true` and an explicit `MICROSOFT_SCOPES` value in Render.
 
 ## New endpoints
 

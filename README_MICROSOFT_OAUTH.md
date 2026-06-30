@@ -59,6 +59,8 @@ https://psychapp.bfab.io/api/oauth/callback/google
 
 ## Render variables
 
+Use `MICROSOFT_TENANT=common` for the normal production app when the Entra registration allows both organizational and personal accounts. Use `consumers` only when intentionally isolating personal Outlook/Hotmail/Live account debugging.
+
 ```env
 PUBLIC_BASE_URL=https://psychapp.bfab.io
 OAUTH_COOKIE_SECRET=<long-random-string>
