@@ -59,10 +59,46 @@ const EXPORT_SOURCES = [
 ];
 
 const ANALYSIS_MODES = [
+  { id: 'early_warning_report', label: 'Alerta temprana' },
   { id: 'case_formulation', label: 'Formulación de caso' },
   { id: 'personality', label: 'Personalidad' },
   { id: 'clinical_report', label: 'Informe clínico' }
 ];
+
+const BEHAVIORAL_SOURCE_OPTIONS = [
+  { id: 'calendar', label: 'Calendario' },
+  { id: 'email_metadata', label: 'Metadatos email' },
+  { id: 'email_text', label: 'Texto email' },
+  { id: 'tasks', label: 'Tareas' },
+  { id: 'notes', label: 'Notas/Drive' },
+  { id: 'chat_history', label: 'Chats' },
+  { id: 'uploaded_files', label: 'Archivos' },
+  { id: 'public_profiles', label: 'Perfiles publicos' },
+  { id: 'remote_mcp', label: 'MCP remoto' },
+  { id: 'wearables', label: 'Actividad' },
+  { id: 'sleep_logs', label: 'Sueno' },
+  { id: 'location', label: 'Ubicacion' }
+];
+
+const CURRENT_WINDOW_OPTIONS = ['24h', '3d', '7d', '30d'];
+
+const DEFAULT_BEHAVIORAL_CONSENT = {
+  consent_confirmed: false,
+  calendar: true,
+  email_metadata: true,
+  email_text: false,
+  tasks: true,
+  notes: true,
+  chat_history: false,
+  uploaded_files: true,
+  public_profiles: false,
+  remote_mcp: false,
+  wearables: false,
+  sleep_logs: false,
+  location: false,
+  baseline_days: 90,
+  current_windows: CURRENT_WINDOW_OPTIONS
+};
 
 function sameStringList(a, b) {
   if (a.length !== b.length) return false;
@@ -77,7 +113,8 @@ function App() {
   const [files, setFiles] = useState([]);
   const [centralText, setCentralText] = useState('');
   const [centralDocument, setCentralDocument] = useState(null);
-  const [analysisMode, setAnalysisMode] = useState('case_formulation');
+  const [analysisMode, setAnalysisMode] = useState('early_warning_report');
+  const [behavioralConsent, setBehavioralConsent] = useState(DEFAULT_BEHAVIORAL_CONSENT);
   const [profiles, setProfiles] = useState([
     { id: crypto.randomUUID(), url: 'https://x.com/oibafsaijem', enabled: true },
     { id: crypto.randomUUID(), url: 'https://instagram.com/soyoibaf', enabled: true }
@@ -105,6 +142,47 @@ function App() {
     () => profiles.filter(profile => profile.enabled && profile.url.trim()).map(profile => profile.url.trim()),
     [profiles]
   );
+  const isEarlyWarningMode = analysisMode === 'early_warning_report';
+  const analysisRequiresConsent = Boolean(
+    isEarlyWarningMode
+    || selectedConnectors.length
+    || activeProfileUrls.length
+    || files.length
+    || centralDocument
+    || centralText.trim()
+    || notes.trim()
+    || remoteMcp.url.trim()
+  );
+
+  function updateBehavioralConsent(patch) {
+    setBehavioralConsent(current => ({ ...current, ...patch }));
+  }
+
+  function toggleBehavioralSource(id) {
+    setBehavioralConsent(current => ({ ...current, [id]: !current[id] }));
+  }
+
+  function toggleCurrentWindow(windowId) {
+    setBehavioralConsent(current => {
+      const selected = current.current_windows.includes(windowId)
+        ? current.current_windows.filter(item => item !== windowId)
+        : [...current.current_windows, windowId];
+      return { ...current, current_windows: selected.length ? selected : [windowId] };
+    });
+  }
+
+  function mentalHealthPayload() {
+    return {
+      enabled: isEarlyWarningMode,
+      purpose: 'non_diagnostic_early_warning',
+      consent_confirmed: behavioralConsent.consent_confirmed,
+      allowed_sources: BEHAVIORAL_SOURCE_OPTIONS
+        .filter(option => behavioralConsent[option.id])
+        .map(option => option.id),
+      baseline_days: Number(behavioralConsent.baseline_days) || 90,
+      current_windows: behavioralConsent.current_windows
+    };
+  }
 
   async function refreshStatus() {
     setError('');
@@ -281,6 +359,11 @@ function App() {
     setBusy('analysis');
     setError('');
     setAnalysis(null);
+    if (analysisRequiresConsent && !behavioralConsent.consent_confirmed) {
+      setError('Confirma consentimiento explicito antes de analizar datos personales, conectores, archivos o perfiles.');
+      setBusy('');
+      return;
+    }
     try {
       const remote_mcp_servers = remoteMcp.url.trim()
         ? [{
@@ -301,7 +384,8 @@ function App() {
           profile_urls: activeProfileUrls,
           files,
           connector_ids: selectedConnectors,
-          remote_mcp_servers
+          remote_mcp_servers,
+          mental_health_early_warning: mentalHealthPayload()
         })
       });
       const data = await response.json();
@@ -425,11 +509,11 @@ function App() {
           <div className="analysis-header">
             <div>
               <p className="eyebrow">Analysis workspace</p>
-              <h2>Análisis exhaustivo</h2>
+              <h2>{isEarlyWarningMode ? 'Informe de alerta temprana' : 'Analisis exhaustivo'}</h2>
             </div>
             <button className="primary-button" onClick={runAnalysis} disabled={busy === 'analysis'}>
               {busy === 'analysis' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              Iniciar análisis completo
+              {isEarlyWarningMode ? 'Generar informe de alerta' : 'Iniciar analisis completo'}
             </button>
           </div>
 
@@ -472,6 +556,63 @@ function App() {
                   Quitar
                 </button>
               )}
+            </div>
+          </section>
+
+          <section className="work-section consent-section">
+            <div className="section-title split">
+              <span>
+                <ShieldCheck size={18} />
+                <h3>Consentimiento y minimizacion</h3>
+              </span>
+              <label className={behavioralConsent.consent_confirmed ? 'consent-confirm active' : 'consent-confirm'}>
+                <input
+                  type="checkbox"
+                  checked={behavioralConsent.consent_confirmed}
+                  onChange={event => updateBehavioralConsent({ consent_confirmed: event.target.checked })}
+                />
+                <span>No diagnostico, con consentimiento</span>
+              </label>
+            </div>
+
+            <div className="consent-layout">
+              <div className="source-consent-grid">
+                {BEHAVIORAL_SOURCE_OPTIONS.map(option => (
+                  <label key={option.id} className={behavioralConsent[option.id] ? 'source-consent selected' : 'source-consent'}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(behavioralConsent[option.id])}
+                      onChange={() => toggleBehavioralSource(option.id)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="baseline-controls">
+                <label>
+                  <span>Baseline dias</span>
+                  <input
+                    type="number"
+                    min="30"
+                    max="365"
+                    value={behavioralConsent.baseline_days}
+                    onChange={event => updateBehavioralConsent({ baseline_days: event.target.value })}
+                  />
+                </label>
+                <div className="window-options" aria-label="Ventanas actuales">
+                  {CURRENT_WINDOW_OPTIONS.map(windowId => (
+                    <button
+                      key={windowId}
+                      type="button"
+                      className={behavioralConsent.current_windows.includes(windowId) ? 'mode-tab active' : 'mode-tab'}
+                      onClick={() => toggleCurrentWindow(windowId)}
+                    >
+                      {windowId}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </section>
 

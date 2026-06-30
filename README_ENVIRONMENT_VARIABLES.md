@@ -38,7 +38,7 @@ MICROSOFT_COOKIE_ID=
 GOOGLE_COOKIE_ID=
 ```
 
-The backend stores all OAuth provider sessions in the same encrypted HttpOnly cookie named `psychapp_oauth`.
+The backend uses a small HttpOnly session cookie named `psychapp_oauth_sid`. OAuth token payloads should be stored server-side through Supabase when `SUPABASE_URL` and a server-only Supabase key are configured.
 
 ## Critical rule about scopes
 
@@ -85,7 +85,7 @@ PUBLIC_BASE_URL=https://psychapp.bfab.io/
 
 ## OpenAI
 
-Recommended on Render: use a Secret File, not a normal env var.
+Recommended on Render: use a Secret File, not a normal env var. The backend accepts either `OPENAI_API_KEY` or `OPENAI_API_SECRET` as an environment variable or secret-file name.
 
 Secret File:
 
@@ -101,6 +101,10 @@ Normal model settings:
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
 ```
+
+## Mental health early warning analysis
+
+No additional secret is required. The frontend sends `mental_health_early_warning` with explicit consent, allowed source categories, baseline length, and current comparison windows. The backend enforces this before calling OpenAI, filters MCP connectors in `early_warning_report`, and logs only safe request metadata to Supabase.
 
 ## Google OAuth
 
@@ -147,7 +151,7 @@ Preferred names:
 MICROSOFT_CLIENT_ID=...
 MICROSOFT_CLIENT_SECRET=...
 MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 ```
 
 Accepted aliases:
@@ -169,10 +173,10 @@ Microsoft redirect URI to register in Microsoft Entra:
 https://psychapp.bfab.io/api/oauth/callback/microsoft
 ```
 
-For personal Outlook/Hotmail/Live accounts, keep:
+For broad Google/Microsoft connector compatibility, the currently verified Render deployment uses:
 
 ```env
-MICROSOFT_TENANT=consumers
+MICROSOFT_TENANT=common
 ```
 
 Do not set `MICROSOFT_SCOPES` unless `ALLOW_CUSTOM_OAUTH_SCOPES=true`.
@@ -198,6 +202,17 @@ Team.ReadBasic.All
 ```
 
 Add those only later for work/school Microsoft 365 accounts if you really need SharePoint or Teams.
+
+## Supabase server-side persistence
+
+Use a server-only service role secret for persistence and audit writes:
+
+```env
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-side service role key>
+```
+
+Do not use an anon/publishable key for `SUPABASE_SERVICE_ROLE_KEY`; anon keys cannot reliably insert server-side audit/run rows that are intentionally restricted by RLS and grants.
 
 ## OAuth cookie secret generation
 
