@@ -10,7 +10,8 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
     readBody = fallbackReadBody,
     absoluteBaseUrl = fallbackBaseUrl,
     publicDiagnostics = () => ({}),
-    getOpenAIKeyWithMeta = () => ({ value: '' })
+    getOpenAIKeyWithMeta = () => ({ value: '' }),
+    getSupabaseKeyWithMeta = () => ({ value: '', source: '' })
   } = deps;
 
   const usedAuthorizationCodes = new Set();
@@ -669,7 +670,7 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
   }
 
   async function audit(eventType, { clientId = '', subject = '', resource = '', scopes = [], toolName = '', metadata = {} } = {}) {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return;
+    if (!process.env.SUPABASE_URL || !supabaseServiceRoleKey().value) return;
     await supabaseInsert('psychapp_mcp_oauth_audit', {
       event_type: eventType,
       subject: subject || null,
@@ -683,7 +684,7 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
 
   async function supabaseInsert(table, payload) {
     const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
-    const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+    const key = supabaseServiceRoleKey().value;
     if (!url || !key) return { ok: false };
     const response = await fetch(`${url}/rest/v1/${table}`, {
       method: 'POST',
@@ -712,9 +713,37 @@ export function createPsychAppMcpOAuthHandler(deps = {}) {
       registration_endpoint: `${issuer(req)}/oauth/register`,
       scopes_supported: scopeList(),
       owner_pin_configured: Boolean(String(process.env.PSYCHAPP_MCP_OWNER_PIN || '').trim()),
-      supabase_audit_enabled: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
+      supabase_audit_enabled: Boolean(process.env.SUPABASE_URL && supabaseServiceRoleKey().value),
       allowed_redirect_policy: process.env.PSYCHAPP_MCP_ALLOWED_REDIRECT_URIS ? 'explicit_env_allowlist' : 'chatgpt_default_allowlist'
     };
+  }
+
+  function supabaseServiceRoleKey() {
+    const fromServer = getSupabaseKeyWithMeta();
+    if (fromServer?.value && supabaseKeyKind(fromServer.source, fromServer.value) === 'service_role') return fromServer;
+    const direct = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+    return direct ? { value: direct, source: 'env:SUPABASE_SERVICE_ROLE_KEY' } : { value: '', source: '' };
+  }
+
+  function jwtPayload(value = '') {
+    const parts = String(value || '').split('.');
+    if (parts.length < 2) return null;
+    try {
+      return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function supabaseKeyKind(source = '', value = '') {
+    const role = String(jwtPayload(value)?.role || '').toLowerCase();
+    if (role === 'service_role') return 'service_role';
+    if (role === 'anon') return 'anon';
+    const text = String(source || '').toLowerCase();
+    if (text.includes('service_role')) return 'service_role';
+    if (text.includes('anon')) return 'anon';
+    if (text.includes('publishable')) return 'publishable';
+    return source ? 'configured' : '';
   }
 
   function verifyBearer(req) {

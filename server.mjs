@@ -299,15 +299,20 @@ function getOpenAIKeyWithMeta() {
 }
 
 function getSupabaseKeyWithMeta() {
-  return findSecret([
+  const names = [
     'SUPABASE_SERVICE_ROLE_KEY',
+    'supabase_service_role_key',
+    'SUPABASE_KEY',
+    'supabase_key',
     'SUPABASE_ANON_KEY',
     'SUPABASE_PUBLISHABLE_KEY',
-    'SUPABASE_KEY',
-    'supabase_service_role_key',
     'supabase_anon_key',
     'supabase_publishable_key'
-  ]);
+  ];
+  const found = names
+    .map(name => findSecret([name]))
+    .filter(info => info.value);
+  return found.find(info => supabaseKeyKind(info.source, info.value) === 'service_role') || found[0] || { value: '', source: '' };
 }
 
 function supabaseConfig() {
@@ -316,7 +321,20 @@ function supabaseConfig() {
   return { url, key };
 }
 
-function supabaseKeyKind(source = '') {
+function jwtPayload(value = '') {
+  const parts = String(value || '').split('.');
+  if (parts.length < 2) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function supabaseKeyKind(source = '', value = '') {
+  const role = String(jwtPayload(value)?.role || '').toLowerCase();
+  if (role === 'service_role') return 'service_role';
+  if (role === 'anon') return 'anon';
   const text = String(source || '').toLowerCase();
   if (text.includes('service_role')) return 'service_role';
   if (text.includes('anon')) return 'anon';
@@ -2594,7 +2612,7 @@ function healthDiagnostics(req = null) {
       configured: Boolean(process.env.SUPABASE_URL && supabaseKey.value),
       url_present: Boolean(process.env.SUPABASE_URL),
       key_present: Boolean(supabaseKey.value),
-      key_kind: supabaseKeyKind(supabaseKey.source),
+      key_kind: supabaseKeyKind(supabaseKey.source, supabaseKey.value),
       timeout_ms: SUPABASE_TIMEOUT_MS
     },
     node: process.version,
@@ -2652,7 +2670,7 @@ function publicDiagnostics(req = null) {
       url_present: Boolean(process.env.SUPABASE_URL),
       key_present: Boolean(supabaseKey.value),
       key_source: safeSource(supabaseKey.source),
-      key_kind: supabaseKeyKind(supabaseKey.source)
+      key_kind: supabaseKeyKind(supabaseKey.source, supabaseKey.value)
     },
     node: process.version
   };
@@ -2687,7 +2705,8 @@ const psychAppMcpOAuth = createPsychAppMcpOAuthHandler({
   readBody,
   absoluteBaseUrl,
   publicDiagnostics,
-  getOpenAIKeyWithMeta
+  getOpenAIKeyWithMeta,
+  getSupabaseKeyWithMeta
 });
 
 function serveStatic(req, res, originalPathname, strippedPathname) {

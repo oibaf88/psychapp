@@ -35,7 +35,8 @@ const psychappMcpOAuthHandler = createPsychAppMcpOAuthHandler({
   readBody,
   absoluteBaseUrl,
   publicDiagnostics,
-  getOpenAIKeyWithMeta
+  getOpenAIKeyWithMeta,
+  getSupabaseKeyWithMeta
 });
 `;
     if (!code.includes(serverMarker)) throw new Error('Cannot find server creation marker in server.mjs');
