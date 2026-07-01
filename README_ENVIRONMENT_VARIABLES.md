@@ -246,6 +246,8 @@ OPENAI_MODEL=gpt-4.1-mini
 OPENAI_STORE=false
 MCP_REQUIRE_APPROVAL=never
 ALLOW_CUSTOM_OAUTH_SCOPES=false
+SUPABASE_URL=https://zzgavefdyzbukbrowzot.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=server_side_service_role_key
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
@@ -259,6 +261,12 @@ Plus Render Secret File:
 
 ```text
 OPENAI_API_SECRET
+```
+
+After deployment, verify the public configuration without printing secrets:
+
+```powershell
+npm run verify:production
 ```
 
 ## Variables to remove from Render while debugging

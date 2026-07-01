@@ -55,6 +55,9 @@ PSYCHAPP_MCP_PUBLIC_BASE_URL=https://psychapp.bfab.io
 PSYCHAPP_MCP_OWNER_PIN=<private owner pin>
 PSYCHAPP_MCP_OAUTH_SECRET=<long random string>
 
+SUPABASE_URL=https://zzgavefdyzbukbrowzot.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-side service role key, not anon/publishable>
+
 GOOGLE_CLIENT_ID=<google web oauth client id>
 GOOGLE_CLIENT_SECRET=<google client secret>
 GOOGLE_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/google
@@ -67,7 +70,15 @@ MICROSOFT_REDIRECT_URI=https://psychapp.bfab.io/api/oauth/callback/microsoft
 
 OpenAI should stay server-side as either `OPENAI_API_KEY` or a Render Secret File accepted by the backend. Do not expose it in the browser.
 
+Supabase must also stay server-side. `/psychapp/api/health` must report `supabase.key_kind: "service_role"`; if it reports `anon` or `publishable`, Render is using the wrong Supabase key and audit/snapshot writes are not production-ready.
+
 If `GOOGLE_SCOPES` or `MICROSOFT_SCOPES` are present while `ALLOW_CUSTOM_OAUTH_SCOPES=false`, the backend ignores them and uses the safe defaults below.
+
+Run this after every deployment:
+
+```powershell
+npm run verify:production
+```
 
 ## 3. Google Cloud setup
 
