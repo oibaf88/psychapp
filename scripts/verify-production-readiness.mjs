@@ -102,8 +102,11 @@ async function verifyMcpDebug() {
   if (body.mcp_endpoint !== `${baseUrl}/mcp`) {
     fail(`/api/mcp/debug mcp_endpoint is ${JSON.stringify(body.mcp_endpoint)}`);
   }
+  if (body.owner_pin_configured !== true) {
+    fail('PSYCHAPP_MCP_OWNER_PIN is not configured on Render');
+  }
   if (body.supabase_audit_enabled !== true) {
-    warn('MCP debug reports Supabase audit disabled');
+    fail('MCP debug reports Supabase audit disabled');
   }
 }
 
