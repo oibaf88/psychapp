@@ -269,6 +269,15 @@ After deployment, verify the public configuration without printing secrets:
 npm run verify:production
 ```
 
+To configure the remaining Render secrets through the Render API instead of the dashboard:
+
+```powershell
+$env:RENDER_API_KEY="<render api key>"
+$env:SUPABASE_SERVICE_ROLE_KEY="<supabase service_role key>"
+$env:PSYCHAPP_MCP_OWNER_PIN="<private owner pin>"
+npm run render:configure-production
+```
+
 ## Variables to remove from Render while debugging
 
 Remove or leave unset:

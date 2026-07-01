@@ -80,6 +80,18 @@ Run this after every deployment:
 npm run verify:production
 ```
 
+If you have a Render API key and the missing secrets locally, this repo also includes an executable production setup helper:
+
+```powershell
+$env:RENDER_API_KEY="<render api key>"
+$env:SUPABASE_SERVICE_ROLE_KEY="<supabase service_role key>"
+$env:PSYCHAPP_MCP_OWNER_PIN="<private owner pin>"
+npm run render:configure-production
+npm run verify:production
+```
+
+The helper validates that the Supabase key is a `service_role` JWT before sending it to Render.
+
 ## 3. Google Cloud setup
 
 Create an OAuth client:

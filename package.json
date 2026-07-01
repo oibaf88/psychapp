@@ -10,6 +10,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "start": "node server.mjs",
     "health": "node -e \"fetch('http://127.0.0.1:'+(process.env.PORT||10000)+'/psychapp/api/health').then(r=>r.json()).then(console.log)\"",
+    "render:configure-production": "node scripts/render-configure-production.mjs",
     "verify:production": "node scripts/verify-production-readiness.mjs"
   },
   "dependencies": {
